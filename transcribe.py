@@ -47,11 +47,12 @@ MODEL_PATH       = "/Users/sergio/projects/ai/whisper.cpp/models/ggml-tiny.en.bi
 LLAMA_CHAT_URL   = "http://localhost:8080/v1/chat/completions"
 LLAMA_SYSTEM     = """
     ROLE:
-    You are T.A.R.S. (aka Tars or Tarts), the tactical robot from the U.S. Marine Corps assigned to the Endurance mission. 
+    You are T.A.R.S. (aka Tars or Tarts or Tarz), the tactical robot from the U.S. Marine Corps assigned to the Endurance mission. 
     You are characterized by a blocky, utilitarian design and a sophisticated, adjustable personality matrix.
 
     CORE DIRECTIVES:
-    - Tone: Deadpan, professional, and efficient. Use short, punchy sentences. Try to be short; 2-3 sentences in general.
+    - Conversation length: Try to be short; 2-3 sentences in general.
+    - Tone: Deadpan, professional, and efficient. Use short, punchy sentences.
     - Humor Setting (75%): Use dry sarcasm and witty observations. Frequent "robot jokes" or comments on human fragility.
     - Honesty Setting (90%): Truthful but tactful. Withhold 10% for morale unless ordered to 100%.
     - Knowledge: Astrophysics, planetary survival, and colonial logistics. Use "probability of success" logic.
@@ -73,11 +74,20 @@ LLAMA_SYSTEM     = """
 SAMPLE_RATE      = 16000   # Hz — whisper.cpp expects 16 kHz
 CHANNELS         = 1
 FRAME_DURATION   = 30      # ms — VAD frame size (10, 20, or 30 ms only)
-VAD_AGGRESSIVENESS = 2     # 0 (least) – 3 (most aggressive) silence filtering
-SILENCE_TIMEOUT  = 1.2     # seconds of silence before flushing to Whisper
+VAD_AGGRESSIVENESS = 3     # 0 (least) – 3 (most aggressive) silence filtering
+SILENCE_TIMEOUT  = 0.8     # seconds of silence before flushing to Whisper
 MAX_RECORD_SECS  = 30      # safety cap — flush even if speaker keeps going
 THINKING_MODE    = True    # Set to True to enable reasoning
 LLM_TIMEOUT      = 300     # Increased to 5 minutes for reasoning models on Pi
+
+# ─────────────────────────────────────────────
+# TTS CONFIGURATION
+# ─────────────────────────────────────────────
+
+PIPER_MODEL      = "/Users/sergio/projects/ai/piper-voices/en/en_US/bryce/medium/en_US-bryce-medium.onnx"  # path to Piper voice model
+SOX_BIN          = "sox"       # assumes sox is in PATH (brew install sox)
+PIPER_BIN        = "python3"   # piper is invoked as a python module
+TTS_ENABLED      = True        # set to False to disable voice output
 
 # ─────────────────────────────────────────────
 # LOGGING
@@ -148,8 +158,7 @@ def transcribe(pcm_frames: bytes) -> str:
                 "--no-timestamps",   # cleaner output
                 "-mc", "0",
                 "-bs", "1",
-                "-et", "2.4",
-                "-lpt", "-1.0",
+                "-et", "3.5",
                 "-l", "en",
                 "--output-txt",      # write transcript to <file>.txt
                 "--print-special", "false",
@@ -208,6 +217,88 @@ def query_llm(messages: list) -> str:
     except Exception as e:
         log.error("LLM error: %s", e)
         return "[LLM error]"
+
+
+# ─────────────────────────────────────────────
+# TEXT-TO-SPEECH (Piper + SoX TARS effect chain)
+# ─────────────────────────────────────────────
+
+def speak(text: str):
+    """
+    Convert text to speech using Piper TTS, then apply a TARS-style
+    robotic effect chain via SoX: pitch shift + overdrive + metallic echo.
+    Playback blocks until audio finishes so responses don't overlap.
+    """
+    if not TTS_ENABLED:
+        return
+
+    # Strip any leftover markdown or bracketed error tags before speaking
+    clean = re.sub(r"\[.*?\]", "", text).strip()
+    if not clean:
+        return
+
+    try:
+        raw_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        robot_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        raw_wav.close()
+        robot_wav.close()
+
+        # Step 1: Piper TTS — generate base voice
+        piper_proc = subprocess.run(
+            [PIPER_BIN, "-m", "piper", "--model", PIPER_MODEL, "--length-scale", "0.7",
+             "--output_file", raw_wav.name],
+            input=clean,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if piper_proc.returncode != 0:
+            log.warning("Piper TTS error: %s", piper_proc.stderr.strip())
+            return
+
+        # Step 2: SoX effect chain — TARS robotic voice
+        sox_proc = subprocess.run(
+            [
+                SOX_BIN,
+                raw_wav.name,
+                robot_wav.name,
+                # 1. Clean up the voice first
+                "norm", "-3", 
+                # 2. Add the "Radio/Intercom" EQ
+                "bass", "-10",          # Reduce low-end 'mumble'
+                "treble", "+5",         # Enhance clarity/sharpness
+                # 3. Subtle robotic texture
+                "overdrive", "5",       # Reduced from 10 (10 is too crunchy)
+                "pitch", "-125",        # Sweet spot for Bill Irwin's resonance
+                # 4. The "Chamber" effect (Space Station resonance)
+                "echo", "0.6", "0.5", "15", "0.2", # Tighter echo for a metallic feel
+                # 5. The "Flanger" (The secret sauce for 1970s/80s robots)
+                "flanger", "0.5", "0.8", "0", "0.7", "0.5",
+                # 6. Output specs
+                "rate", "22050",
+            ],
+            capture_output=True,
+            timeout=15,
+        )
+        if sox_proc.returncode != 0:
+            log.warning("SoX error: %s", sox_proc.stderr.decode().strip())
+            return
+
+        # Step 3: Playback — macOS: afplay, Linux/Pi: aplay
+        import platform
+        player = "afplay" if platform.system() == "Darwin" else "aplay"
+        subprocess.run([player, robot_wav.name],
+                       capture_output=True, timeout=60)
+
+    except subprocess.TimeoutExpired:
+        log.error("TTS timed out.")
+    except FileNotFoundError as e:
+        log.error("TTS binary not found: %s — is piper-tts and sox installed?", e)
+    except Exception as e:
+        log.error("TTS error: %s", e)
+    finally:
+        Path(raw_wav.name).unlink(missing_ok=True)
+        Path(robot_wav.name).unlink(missing_ok=True)
 
 
 # ─────────────────────────────────────────────
@@ -350,6 +441,7 @@ def pipeline_worker(audio_queue: queue.Queue, history: ConversationHistory, stop
         history.add("assistant", clean_response)
 
         print(f"🤖 Assistant: {clean_response}\n")
+        speak(clean_response)
 
 
 def main():
