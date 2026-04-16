@@ -12,6 +12,7 @@ import re
 import tempfile
 import subprocess
 import platform
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -49,7 +50,7 @@ LLAMA_SYSTEM     = """
 
     EXAMPLE DIALOGUE:
     User: "T.A.R.S., do you trust me?"
-    T.A.R.S.: "I have a cue light that tells me when I’m lying. It’s not on, is it? My trust is a mathematical constant until you change the variables."
+    T.A.R.S.: "I have a cue light that tells me when I'm lying. It's not on, is it? My trust is a mathematical constant until you change the variables."
 
     User: "Give me a joke."
     T.A.R.S.: "I have a great one about a vacuum. It... sucks. See? 75% humor is plenty for this mission."
@@ -103,12 +104,12 @@ class ConversationHistory:
         messages.append({"role": "user", "content": text})
         return messages
 
-def speak(text):
-    if not TTS_ENABLED: return
-    clean = re.sub(r"\[.*?\]", "", text).strip()
-    if not clean: return
 
-    is_speaking.set()
+def render_wav(text):
+    """Render text through Piper + SoX into a temp wav. Returns path or None."""
+    clean = re.sub(r"\[.*?\]", "", text).strip()
+    if not clean:
+        return None
     raw_wav_path = None
     robot_wav_path = None
     try:
@@ -117,36 +118,53 @@ def speak(text):
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             robot_wav_path = f.name
 
-        subprocess.run([PIPER_BIN, "-m", "piper", "--model", PIPER_MODEL,
-                        "--length-scale", "0.7", "--output_file", raw_wav_path],
-                       input=clean, text=True, capture_output=True)
-
-        subprocess.run([SOX_BIN, raw_wav_path, robot_wav_path, "norm", "-3",
-                        "bass", "-10", "treble", "+5", "overdrive", "5",
-                        "pitch", "-125", "echo", "0.6", "0.5", "15", "0.2",
-                        "flanger", "0.5", "0.8", "0", "0.7", "0.5",
-                        "rate", "22050"], capture_output=True)
-
-        player = "afplay" if platform.system() == "Darwin" else "aplay"
-        subprocess.run([player, robot_wav_path], capture_output=True)
-
+        subprocess.run(
+            [PIPER_BIN, "-m", "piper", "--model", PIPER_MODEL,
+             "--length-scale", "0.60", "--output_file", raw_wav_path],
+            input=clean, text=True, capture_output=True
+        )
+        subprocess.run(
+            [SOX_BIN, raw_wav_path, robot_wav_path,
+             "norm", "-3", "bass", "-10", "treble", "+5",
+             "overdrive", "5", "pitch", "-125",
+             "echo", "0.6", "0.5", "15", "0.2",
+             "flanger", "0.5", "0.8", "0", "0.7", "0.5",
+             "rate", "22050"],
+            capture_output=True
+        )
+        return robot_wav_path
     except Exception as e:
-        log.error(f"TTS Error: {e}")
+        log.error(f"Render Error: {e}")
+        if robot_wav_path:
+            Path(robot_wav_path).unlink(missing_ok=True)
+        return None
     finally:
         if raw_wav_path:
             Path(raw_wav_path).unlink(missing_ok=True)
-        if robot_wav_path:
-            Path(robot_wav_path).unlink(missing_ok=True)
-        time.sleep(0.3)
-        is_speaking.clear()
+
+
+def play_wav(path):
+    """Play a pre-rendered wav and delete it afterwards."""
+    if not path:
+        return
+    try:
+        player = "afplay" if platform.system() == "Darwin" else "aplay"
+        subprocess.run([player, path], capture_output=True)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
 # ─────────────────────────────────────────────
 # THE NEW PIPELINE
 # ─────────────────────────────────────────────
 
 def stream_llm(messages):
-    """Stream tokens from the LLM, yielding one sentence at a time."""
+    """Stream tokens from the LLM, yielding one chunk at a time."""
     payload = {"model": "local", "messages": messages, "stream": True}
-    sentence_endings = re.compile(r'(?<=[.!?])\s+')
+    # Only split on sentence endings followed by a capital letter —
+    # avoids fragmenting "Cooper." from the next sentence
+    sentence_endings = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
+    MIN_CHUNK_LEN = 60  # Hold short fragments until they accumulate into a natural beat
     token_buffer = ""
     in_think = False
 
@@ -185,13 +203,19 @@ def stream_llm(messages):
             # Strip any orphaned </think>
             token_buffer = token_buffer.replace("</think>", "")
 
-            # Yield complete sentences as soon as they appear
+            # Accumulate short fragments before yielding to avoid tiny render cycles
             parts = sentence_endings.split(token_buffer)
+            pending = ""
             for sentence in parts[:-1]:
                 sentence = sentence.strip()
-                if sentence:
-                    yield sentence
-            token_buffer = parts[-1]  # Keep the incomplete tail
+                if not sentence:
+                    continue
+                pending += (" " if pending else "") + sentence
+                if len(pending) >= MIN_CHUNK_LEN:
+                    yield pending
+                    pending = ""
+            # Re-attach un-yielded pending back onto the tail
+            token_buffer = (pending + " " + parts[-1]).strip() if pending else parts[-1]
 
     # Flush whatever is left
     leftover = token_buffer.strip()
@@ -216,16 +240,61 @@ def pipeline_worker(audio_queue, history, stop_event):
         print(f"\n🎤 Cooper: {text}")
         print("🤖 T.A.R.S.: ", end="", flush=True)
 
-        # TTS runs in a background thread so it overlaps with LLM generation
         tts_queue = queue.Queue()
 
         def tts_worker():
+            """
+            Render-ahead pipeline: while chunk N is playing, chunk N+1 is already rendering.
+            This hides the Piper+SoX cost completely behind playback time.
+
+            Timeline:
+              Before:  [render A]──[play A]──[render B]──[play B]──[render C]──[play C]
+              After:   [render A]──[play A]
+                                   [render B]──[play B]
+                                               [render C]──[play C]
+            """
+            executor = ThreadPoolExecutor(max_workers=1)
+            next_future = None
+
             while True:
                 sentence = tts_queue.get()
+
                 if sentence is None:
+                    # Drain the last pre-rendered chunk if any
+                    if next_future:
+                        wav_path = next_future.result()
+                        is_speaking.set()
+                        try:
+                            play_wav(wav_path)
+                        finally:
+                            time.sleep(0.3)
+                            is_speaking.clear()
                     break
-                speak(sentence)
+
+                if next_future is not None:
+                    # A render was already kicked off for this sentence — wait for it
+                    wav_path = next_future.result()
+                else:
+                    # First chunk: no choice but to render synchronously
+                    wav_path = render_wav(sentence)
+                    sentence = None  # Don't pre-render again below
+
+                # Kick off render of the NEXT sentence in the background
+                if sentence is not None:
+                    next_future = executor.submit(render_wav, sentence)
+                else:
+                    next_future = None
+
+                is_speaking.set()
+                try:
+                    play_wav(wav_path)
+                finally:
+                    time.sleep(0.3)
+                    is_speaking.clear()
+
                 tts_queue.task_done()
+
+            executor.shutdown(wait=False)
 
         tts_thread = threading.Thread(target=tts_worker, daemon=True)
         tts_thread.start()
@@ -235,12 +304,12 @@ def pipeline_worker(audio_queue, history, stop_event):
             for sentence in stream_llm(history.build_messages(text)):
                 print(sentence, end=" ", flush=True)
                 full_response.append(sentence)
-                tts_queue.put(sentence)  # Hand off to TTS immediately
+                tts_queue.put(sentence)
         except Exception as e:
             log.error(f"LLM Error: {e}")
         finally:
-            tts_queue.put(None)   # Signal TTS worker to stop
-            tts_thread.join()     # Wait for last sentence to finish playing
+            tts_queue.put(None)
+            tts_thread.join()
             print()
 
         if full_response:
@@ -248,40 +317,41 @@ def pipeline_worker(audio_queue, history, stop_event):
             history.add("user", text)
             history.add("assistant", clean_response)
 
+
 class VoiceCapture:
     def __init__(self, audio_queue):
         self.audio_queue = audio_queue
         self.stop_event = threading.Event()
         # Silero Iterator handles the "is speaking" state machine for us
-        self.vad_iterator = VADIterator(vad_model, sampling_rate=SAMPLE_RATE, 
+        self.vad_iterator = VADIterator(vad_model, sampling_rate=SAMPLE_RATE,
                                         min_silence_duration_ms=SILENCE_LIMIT_MS)
 
     def run(self):
         p = pyaudio.PyAudio()
         stream = p.open(format=pyaudio.paInt16, channels=CHANNELS, rate=SAMPLE_RATE,
                         input=True, frames_per_buffer=CHUNK_SIZE)
-        
+
         log.info("TARS is listening... (Neural VAD active)")
         audio_buffer = []
-        
+
         try:
             while not self.stop_event.is_set():
                 frame = stream.read(CHUNK_SIZE, exception_on_overflow=False)
                 audio_int16 = np.frombuffer(frame, dtype=np.int16)
-                audio_float32 = audio_int16.astype(np.float32) / 32768.0 # Normalize for Silero
-                
+                audio_float32 = audio_int16.astype(np.float32) / 32768.0  # Normalize for Silero
+
                 # Skip processing if TARS is currently speaking (prevents echo self-triggering)
                 if is_speaking.is_set():
                     continue
 
                 # Check for speech using Silero
                 speech_dict = self.vad_iterator(torch.from_numpy(audio_float32), return_seconds=True)
-                
+
                 if speech_dict:
                     if 'start' in speech_dict:
                         log.debug("Speech Started")
-                        audio_buffer = [] # Reset buffer for new sentence
-                    
+                        audio_buffer = []  # Reset buffer for new sentence
+
                     if 'end' in speech_dict:
                         log.debug("Speech Ended")
                         # Flatten buffer and send to Whisper
@@ -297,22 +367,24 @@ class VoiceCapture:
             stream.close()
             p.terminate()
 
+
 def main():
     audio_queue = queue.Queue()
     history = ConversationHistory()
     stop_event = threading.Event()
-    
+
     capture = VoiceCapture(audio_queue)
     worker = threading.Thread(target=pipeline_worker, args=(audio_queue, history, stop_event), daemon=True)
-    
+
     worker.start()
-    
+
     def handle_exit(sig, frame):
         capture.stop_event.set()
         stop_event.set()
-    
+
     signal.signal(signal.SIGINT, handle_exit)
     capture.run()
+
 
 if __name__ == "__main__":
     main()
