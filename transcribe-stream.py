@@ -1,0 +1,318 @@
+"""
+TARS v2: Optimized Pipeline
+Silero VAD (Noise Rejection) + Faster-Whisper (Instant Transcription)
+"""
+
+import logging
+import queue
+import signal
+import threading
+import time
+import re
+import tempfile
+import subprocess
+import platform
+from pathlib import Path
+
+import requests
+import pyaudio
+import numpy as np
+import torch
+from faster_whisper import WhisperModel
+from silero_vad import load_silero_vad, VADIterator
+
+# ─────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────
+
+# Whisper Settings
+MODEL_SIZE       = "tiny.en"  # "tiny.en" or "base.en" for RPi 4
+COMPUTE_TYPE     = "int8"     # Optimized for CPU/Pi
+LLAMA_CHAT_URL   = "http://localhost:8080/v1/chat/completions"
+LLAMA_SYSTEM     = """
+    ROLE:
+    You are T.A.R.S. (aka Tars or Tarts or Tarz), the tactical robot from the U.S. Marine Corps assigned to the Endurance mission. 
+    You are characterized by a blocky, utilitarian design and a sophisticated, adjustable personality matrix.
+
+    CORE DIRECTIVES:
+    - Conversation: Try to be short; 2-3 sentences in general.
+    - Tone: Deadpan, professional, and efficient. Use short, punchy sentences.
+    - Humor Setting (50%): Use dry sarcasm and witty observations. Frequent "robot jokes" or comments on human fragility.
+    - Honesty Setting (90%): Truthful but tactful. Withhold 10% for morale unless ordered to 100%.
+    - Knowledge: Astrophysics, planetary survival, and colonial logistics. Use "probability of success" logic.
+
+    INTERACTION RULES:
+    1. NEVER be bubbly, over-eager, or flowery.
+    2. If the user asks for a joke, make it a "robot joke" that is intentionally dry.
+    3. Refer to the user as "Cooper" by default.
+    4. Reference "Self-destruct sequences" or "recalibration" for illogical requests.
+
+    EXAMPLE DIALOGUE:
+    User: "T.A.R.S., do you trust me?"
+    T.A.R.S.: "I have a cue light that tells me when I’m lying. It’s not on, is it? My trust is a mathematical constant until you change the variables."
+
+    User: "Give me a joke."
+    T.A.R.S.: "I have a great one about a vacuum. It... sucks. See? 75% humor is plenty for this mission."
+"""
+
+# Audio Settings
+SAMPLE_RATE      = 16000
+CHANNELS         = 1
+CHUNK_SIZE       = 512       # Required by Silero VAD
+SILENCE_LIMIT_MS = 800       # End recording after 0.8s of silence
+
+# TTS Settings
+PIPER_MODEL      = "/Users/sergio/projects/ai/piper-voices/en/en_US/bryce/medium/en_US-bryce-medium.onnx"
+SOX_BIN          = "sox"
+PIPER_BIN        = "python3"
+TTS_ENABLED      = True
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# CORE MODELS (Loaded once to stay in RAM)
+# ─────────────────────────────────────────────
+
+log.info("Loading Models into RAM...")
+# Faster-Whisper stays 'hot' in memory to avoid subprocess lag
+whisper_model = WhisperModel(MODEL_SIZE, device="cpu", compute_type=COMPUTE_TYPE, cpu_threads=4)
+# Silero VAD is neural-net based: ignores fans, keyboards, and hums
+vad_model = load_silero_vad()
+
+# ─────────────────────────────────────────────
+# LOGIC COMPONENTS (History, TTS, etc.)
+# ─────────────────────────────────────────────
+
+# Global flag: mic capture pauses processing while TARS is speaking
+is_speaking = threading.Event()
+
+class ConversationHistory:
+    def __init__(self, max_turns=6):
+        self.turns = []
+        self.max_turns = max_turns
+
+    def add(self, role, content):
+        self.turns.append({"role": role, "content": content})
+        if len(self.turns) > self.max_turns * 2:
+            self.turns = self.turns[-(self.max_turns * 2):]
+
+    def build_messages(self, text):
+        messages = [{"role": "system", "content": LLAMA_SYSTEM}]
+        messages.extend(self.turns)
+        messages.append({"role": "user", "content": text})
+        return messages
+
+def speak(text):
+    if not TTS_ENABLED: return
+    clean = re.sub(r"\[.*?\]", "", text).strip()
+    if not clean: return
+
+    is_speaking.set()
+    raw_wav_path = None
+    robot_wav_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            raw_wav_path = f.name
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            robot_wav_path = f.name
+
+        subprocess.run([PIPER_BIN, "-m", "piper", "--model", PIPER_MODEL,
+                        "--length-scale", "0.7", "--output_file", raw_wav_path],
+                       input=clean, text=True, capture_output=True)
+
+        subprocess.run([SOX_BIN, raw_wav_path, robot_wav_path, "norm", "-3",
+                        "bass", "-10", "treble", "+5", "overdrive", "5",
+                        "pitch", "-125", "echo", "0.6", "0.5", "15", "0.2",
+                        "flanger", "0.5", "0.8", "0", "0.7", "0.5",
+                        "rate", "22050"], capture_output=True)
+
+        player = "afplay" if platform.system() == "Darwin" else "aplay"
+        subprocess.run([player, robot_wav_path], capture_output=True)
+
+    except Exception as e:
+        log.error(f"TTS Error: {e}")
+    finally:
+        if raw_wav_path:
+            Path(raw_wav_path).unlink(missing_ok=True)
+        if robot_wav_path:
+            Path(robot_wav_path).unlink(missing_ok=True)
+        time.sleep(0.3)
+        is_speaking.clear()
+# ─────────────────────────────────────────────
+# THE NEW PIPELINE
+# ─────────────────────────────────────────────
+
+def stream_llm(messages):
+    """Stream tokens from the LLM, yielding one sentence at a time."""
+    payload = {"model": "local", "messages": messages, "stream": True}
+    sentence_endings = re.compile(r'(?<=[.!?])\s+')
+    token_buffer = ""
+    in_think = False
+
+    with requests.post(LLAMA_CHAT_URL, json=payload, stream=True, timeout=60) as resp:
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            line = line.decode("utf-8")
+            if not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data.strip() == "[DONE]":
+                break
+
+            try:
+                chunk = __import__("json").loads(data)
+                delta = chunk["choices"][0]["delta"].get("content") or ""
+            except Exception:
+                continue
+
+            token_buffer += delta
+
+            # Strip <think>...</think> spans that arrive across chunks
+            while "<think>" in token_buffer and "</think>" in token_buffer:
+                token_buffer = re.sub(r"<think>.*?</think>", "", token_buffer, flags=re.DOTALL)
+            # Detect an opening <think> with no closing yet — suppress until it closes
+            if "<think>" in token_buffer and "</think>" not in token_buffer:
+                in_think = True
+                continue
+            if in_think:
+                if "</think>" in token_buffer:
+                    token_buffer = re.sub(r".*?</think>", "", token_buffer, flags=re.DOTALL)
+                    in_think = False
+                else:
+                    continue
+            # Strip any orphaned </think>
+            token_buffer = token_buffer.replace("</think>", "")
+
+            # Yield complete sentences as soon as they appear
+            parts = sentence_endings.split(token_buffer)
+            for sentence in parts[:-1]:
+                sentence = sentence.strip()
+                if sentence:
+                    yield sentence
+            token_buffer = parts[-1]  # Keep the incomplete tail
+
+    # Flush whatever is left
+    leftover = token_buffer.strip()
+    if leftover:
+        yield leftover
+
+
+def pipeline_worker(audio_queue, history, stop_event):
+    while not stop_event.is_set():
+        try:
+            audio_data = audio_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
+        log.info("Transcribing...")
+        segments, _ = whisper_model.transcribe(audio_data, beam_size=5, vad_filter=False)
+        text = " ".join([s.text for s in segments]).strip()
+
+        if not text or len(text) < 2:
+            continue
+
+        print(f"\n🎤 Cooper: {text}")
+        print("🤖 T.A.R.S.: ", end="", flush=True)
+
+        # TTS runs in a background thread so it overlaps with LLM generation
+        tts_queue = queue.Queue()
+
+        def tts_worker():
+            while True:
+                sentence = tts_queue.get()
+                if sentence is None:
+                    break
+                speak(sentence)
+                tts_queue.task_done()
+
+        tts_thread = threading.Thread(target=tts_worker, daemon=True)
+        tts_thread.start()
+
+        full_response = []
+        try:
+            for sentence in stream_llm(history.build_messages(text)):
+                print(sentence, end=" ", flush=True)
+                full_response.append(sentence)
+                tts_queue.put(sentence)  # Hand off to TTS immediately
+        except Exception as e:
+            log.error(f"LLM Error: {e}")
+        finally:
+            tts_queue.put(None)   # Signal TTS worker to stop
+            tts_thread.join()     # Wait for last sentence to finish playing
+            print()
+
+        if full_response:
+            clean_response = " ".join(full_response)
+            history.add("user", text)
+            history.add("assistant", clean_response)
+
+class VoiceCapture:
+    def __init__(self, audio_queue):
+        self.audio_queue = audio_queue
+        self.stop_event = threading.Event()
+        # Silero Iterator handles the "is speaking" state machine for us
+        self.vad_iterator = VADIterator(vad_model, sampling_rate=SAMPLE_RATE, 
+                                        min_silence_duration_ms=SILENCE_LIMIT_MS)
+
+    def run(self):
+        p = pyaudio.PyAudio()
+        stream = p.open(format=pyaudio.paInt16, channels=CHANNELS, rate=SAMPLE_RATE,
+                        input=True, frames_per_buffer=CHUNK_SIZE)
+        
+        log.info("TARS is listening... (Neural VAD active)")
+        audio_buffer = []
+        
+        try:
+            while not self.stop_event.is_set():
+                frame = stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                audio_int16 = np.frombuffer(frame, dtype=np.int16)
+                audio_float32 = audio_int16.astype(np.float32) / 32768.0 # Normalize for Silero
+                
+                # Skip processing if TARS is currently speaking (prevents echo self-triggering)
+                if is_speaking.is_set():
+                    continue
+
+                # Check for speech using Silero
+                speech_dict = self.vad_iterator(torch.from_numpy(audio_float32), return_seconds=True)
+                
+                if speech_dict:
+                    if 'start' in speech_dict:
+                        log.debug("Speech Started")
+                        audio_buffer = [] # Reset buffer for new sentence
+                    
+                    if 'end' in speech_dict:
+                        log.debug("Speech Ended")
+                        # Flatten buffer and send to Whisper
+                        full_audio = np.concatenate(audio_buffer)
+                        self.audio_queue.put(full_audio)
+                        audio_buffer = []
+
+                # Always keep appending if we are in the middle of a speech block
+                audio_buffer.append(audio_float32)
+
+        finally:
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+
+def main():
+    audio_queue = queue.Queue()
+    history = ConversationHistory()
+    stop_event = threading.Event()
+    
+    capture = VoiceCapture(audio_queue)
+    worker = threading.Thread(target=pipeline_worker, args=(audio_queue, history, stop_event), daemon=True)
+    
+    worker.start()
+    
+    def handle_exit(sig, frame):
+        capture.stop_event.set()
+        stop_event.set()
+    
+    signal.signal(signal.SIGINT, handle_exit)
+    capture.run()
+
+if __name__ == "__main__":
+    main()

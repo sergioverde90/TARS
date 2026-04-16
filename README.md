@@ -13,3 +13,9 @@ pip install piper-tts
 Quick sanity check — after installing, verify the key ones:
 bashpython -c "import faster_whisper, silero_vad, pyaudio, torch; print('OK')"
 sox --version
+
+# TODO
+
+* make sure the script is cleaning all the *.wav files when finish
+* create a "proxy" to evaluate if enable or not Thinking process.
+    - if so, tell to the user "I'm thinking, be patient..."
