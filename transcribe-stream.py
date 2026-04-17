@@ -17,6 +17,7 @@ from pathlib import Path
 
 import requests
 import pyaudio
+import warnings
 import numpy as np
 import torch
 from faster_whisper import WhisperModel
@@ -43,7 +44,6 @@ SAMPLE_RATE      = 16000
 CHANNELS         = 1
 CHUNK_SIZE       = 512       # Required by Silero VAD
 SILENCE_LIMIT_MS = 800       # End recording after 0.8s of silence
-MIN_AUDIO_DURATION = 0.5     # seconds — ignore clips shorter than this
 
 # TTS Settings
 PIPER_MODEL      = "/Users/sergio/projects/ai/piper-voices/en/en_US/bryce/medium/en_US-bryce-medium.onnx"
@@ -53,6 +53,8 @@ TTS_ENABLED      = True
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="faster_whisper")
 
 # ─────────────────────────────────────────────
 # CORE MODELS (Loaded once to stay in RAM)
@@ -226,17 +228,6 @@ def pipeline_worker(audio_queue, history, stop_event):
             continue
 
         log.info("Transcribing...")
-
-        # Guard: skip chunks that are too short or silent
-        duration = len(audio_data) / SAMPLE_RATE
-        if duration < MIN_AUDIO_DURATION:
-            log.debug(f"Skipping short audio chunk ({duration:.2f}s)")
-            continue
-
-        # Guard: skip chunks that are effectively silent
-        if np.max(np.abs(audio_data)) < 0.01:
-            log.debug("Skipping silent audio chunk")
-            continue
 
         segments, _ = whisper_model.transcribe(audio_data, beam_size=5, vad_filter=False)
         text = " ".join([s.text for s in segments]).strip()
