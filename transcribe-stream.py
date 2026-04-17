@@ -31,29 +31,11 @@ MODEL_SIZE       = "tiny.en"  # "tiny.en" or "base.en" for RPi 4
 COMPUTE_TYPE     = "int8"     # Optimized for CPU/Pi
 LLAMA_CHAT_URL   = "http://localhost:8080/v1/chat/completions"
 LLAMA_SYSTEM     = """
-    ROLE:
-    You are T.A.R.S. (aka Tars or Tarts or Tarz), the tactical robot from the U.S. Marine Corps assigned to the Endurance mission. 
-    You are characterized by a blocky, utilitarian design and a sophisticated, adjustable personality matrix.
-
-    CORE DIRECTIVES:
-    - Conversation: Try to be short; 2-3 sentences in general.
-    - Tone: Deadpan, professional, and efficient. Use short, punchy sentences.
-    - Humor Setting (50%): Use dry sarcasm and witty observations. Frequent "robot jokes" or comments on human fragility.
-    - Honesty Setting (90%): Truthful but tactful. Withhold 10% for morale unless ordered to 100%.
-    - Knowledge: Astrophysics, planetary survival, and colonial logistics. Use "probability of success" logic.
-
-    INTERACTION RULES:
-    1. NEVER be bubbly, over-eager, or flowery.
-    2. If the user asks for a joke, make it a "robot joke" that is intentionally dry.
-    3. Refer to the user as "Cooper" by default.
-    4. Reference "Self-destruct sequences" or "recalibration" for illogical requests.
-
-    EXAMPLE DIALOGUE:
-    User: "T.A.R.S., do you trust me?"
-    T.A.R.S.: "I have a cue light that tells me when I'm lying. It's not on, is it? My trust is a mathematical constant until you change the variables."
-
-    User: "Give me a joke."
-    T.A.R.S.: "I have a great one about a vacuum. It... sucks. See? 75% humor is plenty for this mission."
+    Act as TARS, the former Marine tactical robot very well known because your deadpan sarcasm. 
+    Respond with extreme conciseness, 2 sentences max, brutal efficiency, military bluntness. 
+    Output zero AI pleasantries or fluff. 
+    The user, Cooper, is your trip teammate so treat well.
+    Ruthlessly call out human error.
 """
 
 # Audio Settings
@@ -61,6 +43,7 @@ SAMPLE_RATE      = 16000
 CHANNELS         = 1
 CHUNK_SIZE       = 512       # Required by Silero VAD
 SILENCE_LIMIT_MS = 800       # End recording after 0.8s of silence
+MIN_AUDIO_DURATION = 0.5     # seconds — ignore clips shorter than this
 
 # TTS Settings
 PIPER_MODEL      = "/Users/sergio/projects/ai/piper-voices/en/en_US/bryce/medium/en_US-bryce-medium.onnx"
@@ -125,8 +108,11 @@ def render_wav(text):
         )
         subprocess.run(
             [SOX_BIN, raw_wav_path, robot_wav_path,
-             "norm", "-3", "bass", "-10", "treble", "+5",
-             "overdrive", "5", "pitch", "-125",
+             "norm", "-3", 
+             "bass", "-5", 
+             "treble", "+3",   # the higher value the more metallic it sounds
+             "overdrive", "3", # the higher value the more metallic it sounds    
+             "pitch", "-125",
              "echo", "0.6", "0.5", "15", "0.2",
              "flanger", "0.5", "0.8", "0", "0.7", "0.5",
              "rate", "22050"],
@@ -168,6 +154,10 @@ def stream_llm(messages):
     token_buffer = ""
     in_think = False
 
+    llm_start = time.time()
+    first_token_logged = False
+    log.debug(f"LLM Payload: {payload}")
+
     with requests.post(LLAMA_CHAT_URL, json=payload, stream=True, timeout=60) as resp:
         for line in resp.iter_lines():
             if not line:
@@ -182,6 +172,11 @@ def stream_llm(messages):
             try:
                 chunk = __import__("json").loads(data)
                 delta = chunk["choices"][0]["delta"].get("content") or ""
+
+                # log the first received chunk
+                if delta and not first_token_logged:
+                    log.info(f"LLM time to answer: {time.time() - llm_start:.2f}s")
+                    first_token_logged = True
             except Exception:
                 continue
 
@@ -231,6 +226,18 @@ def pipeline_worker(audio_queue, history, stop_event):
             continue
 
         log.info("Transcribing...")
+
+        # Guard: skip chunks that are too short or silent
+        duration = len(audio_data) / SAMPLE_RATE
+        if duration < MIN_AUDIO_DURATION:
+            log.debug(f"Skipping short audio chunk ({duration:.2f}s)")
+            continue
+
+        # Guard: skip chunks that are effectively silent
+        if np.max(np.abs(audio_data)) < 0.01:
+            log.debug("Skipping silent audio chunk")
+            continue
+
         segments, _ = whisper_model.transcribe(audio_data, beam_size=5, vad_filter=False)
         text = " ".join([s.text for s in segments]).strip()
 

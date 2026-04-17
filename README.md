@@ -16,6 +16,7 @@ sox --version
 
 # TODO
 
-* make sure the script is cleaning all the *.wav files when finish
-* create a "proxy" to evaluate if enable or not Thinking process.
+[x] make sure the script is cleaning all the *.wav files when finish
+[] create a "proxy" to evaluate if enable or not Thinking process.
     - if so, tell to the user "I'm thinking, be patient..."
+[] use `--reasoning-format none` when `llama-server` spin up instead of stripping `<thinking>` annotation    
