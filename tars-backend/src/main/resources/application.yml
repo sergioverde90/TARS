@@ -1,0 +1,38 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: tars-backend
+
+langchain4j:
+  open-ai:
+    # Non-streaming model (used for tool-call loop iterations)
+    chat-model:
+      base-url: http://localhost:8080/v1
+      api-key: not-needed
+      model-name: local
+      timeout: 120s
+      log-requests: false
+      log-responses: false
+    # Streaming model (used for final response to Python client)
+    streaming-chat-model:
+      base-url: http://localhost:8080/v1
+      api-key: not-needed
+      model-name: local
+      timeout: 120s
+      log-requests: false
+      log-responses: false
+
+tars:
+  openrouteservice:
+    api-key: ${ORS_API_KEY:missing-ors-key}
+    base-url: https://api.openrouteservice.org
+  tavily:
+    api-key: ${TAVILY_API_KEY:missing-tavily-key}
+    base-url: https://api.tavily.com
+
+logging:
+  level:
+    com.tars: INFO
+    dev.langchain4j: WARN
