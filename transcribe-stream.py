@@ -42,9 +42,10 @@ LLAMA_SYSTEM     = """
     If input is unintelligible noise, respond only with </not-me>.
     If Cooper's message is clearly ending the conversation, append </closing> at the very end of your response and nothing after it.
 
-    **Think only as much as strictly necessary**
-    **Stop reasoning the moment you are confident in your answer**
-    **Don't "Wait, one check" more than 3 times**
+    Your thinking must be 3 lines maximum:
+    Line 1: The factual answer.
+    Line 2: Persona tone check (one word: pass/adjust).
+    Line 3: Final output.
 """
 
 # Activation: any of these words wake TARS up
@@ -196,7 +197,6 @@ def stream_llm(messages, stream=True):
 
     llm_start = time.time()
     first_token_logged = False
-    log.debug(f"LLM Payload: {payload}")
 
     with requests.post(LLAMA_CHAT_URL, json=payload, stream=True, timeout=LLAMA_TIMEOUT) as resp:
         for line in resp.iter_lines():
@@ -299,6 +299,7 @@ def _run_response(text, history, stream=True, echo=True):
     if TARS_NAME_RE.search(text):
         history.active = True
     if not history.active:
+        log.debug(f"🔇 IGNORED (inactive): {text!r}")
         return
 
     closing_detected = False
@@ -367,6 +368,7 @@ def _run_response(text, history, stream=True, echo=True):
         gen = stream_llm(history.build_messages(text), stream=stream)
         first = next(gen, None)
         if first is None or "</not-me>" in first:
+            log.debug(f"🔇 IGNORED (not-me): {text!r}")
             return
         if echo:
             print(f"\n🎤 Cooper: {text}")
