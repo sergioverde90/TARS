@@ -28,3 +28,5 @@ llama-server -m ../ai/models/Qwen3.5-9B-Q4_K_M.gguf --reasoning-budget 0 -c 1024
     - if so, tell to the user "I'm thinking, be patient..."
 
 - [ ] use `--reasoning-format none` when `llama-server` spin up instead of stripping `<thinking>` annotation    
+
+- [ ] the ninja template is not working properly with /no-thinking

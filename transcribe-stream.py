@@ -3,9 +3,12 @@ TARS v2: Optimized Pipeline
 Silero VAD (Noise Rejection) + Faster-Whisper (Instant Transcription)
 """
 
+import argparse
 import logging
 import queue
 import signal
+import sys
+import termios
 import threading
 import time
 import re
@@ -51,7 +54,7 @@ SOX_BIN          = "sox"
 PIPER_BIN        = "python3"
 TTS_ENABLED      = True
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", stream=__import__("sys").stderr)
 log = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="faster_whisper")
@@ -86,7 +89,9 @@ class ConversationHistory:
     def build_messages(self, text):
         messages = [{"role": "system", "content": LLAMA_SYSTEM}]
         messages.extend(self.turns)
-        messages.append({"role": "user", "content": text})
+        # Send /no-think only on the first user message to suppress chain-of-thought
+        prefix = "/no-think" if not self.turns else ""
+        messages.append({"role": "user", "content": text + " ."+prefix})
         return messages
 
 
@@ -137,7 +142,7 @@ def play_wav(path):
         return
     try:
         player = "afplay" if platform.system() == "Darwin" else "aplay"
-        subprocess.run([player, path], capture_output=True)
+        subprocess.run([player, path], capture_output=True, stdin=subprocess.DEVNULL)
     finally:
         Path(path).unlink(missing_ok=True)
 
@@ -146,9 +151,24 @@ def play_wav(path):
 # THE NEW PIPELINE
 # ─────────────────────────────────────────────
 
-def stream_llm(messages):
+def stream_llm(messages, stream=True):
     """Stream tokens from the LLM, yielding one chunk at a time."""
-    payload = {"model": "local", "messages": messages, "stream": True}
+    payload = {"model": "local", "messages": messages, "stream": stream}
+
+    # Log the full request in cURL format for debugging
+    import json
+    curl_payload = json.dumps(payload, indent=2)
+    log.info(f"cURL equivalent:\ncurl -s {LLAMA_CHAT_URL} \\\n  -H 'Content-Type: application/json' \\\n  -d '{curl_payload}'")
+
+    if not stream:
+        resp = requests.post(LLAMA_CHAT_URL, json=payload, timeout=60)
+        log.debug(f"RAW RESPONSE: {resp.text}")
+        text = resp.json()["choices"][0]["message"]["content"]
+        # Strip <think>...</think> blocks from non-streamed responses
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        yield text
+        return
+
     # Only split on sentence endings followed by a capital letter —
     # avoids fragmenting "Cooper." from the next sentence
     sentence_endings = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
@@ -168,6 +188,10 @@ def stream_llm(messages):
             if not line.startswith("data: "):
                 continue
             data = line[6:]
+
+            # Log the raw SSE line for tracing
+            log.debug(f"RAW SSE: {data}")
+
             if data.strip() == "[DONE]":
                 break
 
@@ -220,7 +244,91 @@ def stream_llm(messages):
         yield leftover
 
 
-def pipeline_worker(audio_queue, history, stop_event):
+def _run_response(text, history, stream=True, echo=True):
+    """Shared logic: send text to LLM, stream response, play TTS."""
+    if echo:
+        print(f"\n🎤 Cooper: {text}")
+    print("🤖 T.A.R.S.: ", end="", flush=True)
+
+    tts_queue = queue.Queue()
+
+    def tts_worker():
+        """
+        Render-ahead pipeline: while chunk N is playing, chunk N+1 is already rendering.
+        This hides the Piper+SoX cost completely behind playback time.
+
+        Timeline:
+          Before:  [render A]──[play A]──[render B]──[play B]──[render C]──[play C]
+          After:   [render A]──[play A]
+                               [render B]──[play B]
+                                           [render C]──[play C]
+        """
+        executor = ThreadPoolExecutor(max_workers=1)
+        next_future = None
+
+        while True:
+            sentence = tts_queue.get()
+
+            if sentence is None:
+                # Drain the last pre-rendered chunk if any
+                if next_future:
+                    wav_path = next_future.result()
+                    is_speaking.set()
+                    try:
+                        play_wav(wav_path)
+                    finally:
+                        time.sleep(0.3)
+                        is_speaking.clear()
+                break
+
+            if next_future is not None:
+                # A render was already kicked off for this sentence — wait for it
+                wav_path = next_future.result()
+            else:
+                # First chunk: no choice but to render synchronously
+                wav_path = render_wav(sentence)
+                sentence = None  # Don't pre-render again below
+
+            # Kick off render of the NEXT sentence in the background
+            if sentence is not None:
+                next_future = executor.submit(render_wav, sentence)
+            else:
+                next_future = None
+
+            is_speaking.set()
+            try:
+                play_wav(wav_path)
+            finally:
+                time.sleep(0.3)
+                is_speaking.clear()
+
+            tts_queue.task_done()
+
+        executor.shutdown(wait=False)
+
+    tts_thread = threading.Thread(target=tts_worker, daemon=True)
+    tts_thread.start()
+
+    full_response = []
+    try:
+        for sentence in stream_llm(history.build_messages(text), stream=stream):
+            print(sentence, end=" ", flush=True)
+            full_response.append(sentence)
+            tts_queue.put(sentence)
+    except Exception as e:
+        log.error(f"LLM Error: {e}")
+    finally:
+        tts_queue.put(None)
+        tts_thread.join()
+        print()
+
+    if full_response:
+        clean_response = " ".join(full_response)
+        history.add("user", text)
+        history.add("assistant", clean_response)
+
+
+def pipeline_worker(audio_queue, history, stop_event, stream=True):
     while not stop_event.is_set():
         try:
             audio_data = audio_queue.get(timeout=0.5)
@@ -235,85 +343,22 @@ def pipeline_worker(audio_queue, history, stop_event):
         if not text or len(text) < 2:
             continue
 
-        print(f"\n🎤 Cooper: {text}")
-        print("🤖 T.A.R.S.: ", end="", flush=True)
+        _run_response(text, history, stream=stream)
 
-        tts_queue = queue.Queue()
 
-        def tts_worker():
-            """
-            Render-ahead pipeline: while chunk N is playing, chunk N+1 is already rendering.
-            This hides the Piper+SoX cost completely behind playback time.
-
-            Timeline:
-              Before:  [render A]──[play A]──[render B]──[play B]──[render C]──[play C]
-              After:   [render A]──[play A]
-                                   [render B]──[play B]
-                                               [render C]──[play C]
-            """
-            executor = ThreadPoolExecutor(max_workers=1)
-            next_future = None
-
-            while True:
-                sentence = tts_queue.get()
-
-                if sentence is None:
-                    # Drain the last pre-rendered chunk if any
-                    if next_future:
-                        wav_path = next_future.result()
-                        is_speaking.set()
-                        try:
-                            play_wav(wav_path)
-                        finally:
-                            time.sleep(0.3)
-                            is_speaking.clear()
-                    break
-
-                if next_future is not None:
-                    # A render was already kicked off for this sentence — wait for it
-                    wav_path = next_future.result()
-                else:
-                    # First chunk: no choice but to render synchronously
-                    wav_path = render_wav(sentence)
-                    sentence = None  # Don't pre-render again below
-
-                # Kick off render of the NEXT sentence in the background
-                if sentence is not None:
-                    next_future = executor.submit(render_wav, sentence)
-                else:
-                    next_future = None
-
-                is_speaking.set()
-                try:
-                    play_wav(wav_path)
-                finally:
-                    time.sleep(0.3)
-                    is_speaking.clear()
-
-                tts_queue.task_done()
-
-            executor.shutdown(wait=False)
-
-        tts_thread = threading.Thread(target=tts_worker, daemon=True)
-        tts_thread.start()
-
-        full_response = []
+def terminal_worker(history, stop_event, stream=True):
+    """No-microphone mode: read text from stdin and feed it directly into the pipeline."""
+    print("\n💬 Terminal mode — type your message and press Enter. Ctrl+C to quit.\n")
+    while not stop_event.is_set():
         try:
-            for sentence in stream_llm(history.build_messages(text)):
-                print(sentence, end=" ", flush=True)
-                full_response.append(sentence)
-                tts_queue.put(sentence)
-        except Exception as e:
-            log.error(f"LLM Error: {e}")
-        finally:
-            tts_queue.put(None)
-            tts_thread.join()
-            print()
-
-        if full_response:
-            clean_response = " ".join(full_response)
-            history.add("user", text)
-            history.add("assistant", clean_response)
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+            text = input("Cooper: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            stop_event.set()
+            break
+        if text:
+            _run_response(text, history, stream=stream, echo=False)
+    print("\nExiting TARS. Hooah.")
 
 
 class VoiceCapture:
@@ -367,21 +412,42 @@ class VoiceCapture:
 
 
 def main():
-    audio_queue = queue.Queue()
+    parser = argparse.ArgumentParser(description="TARS v2")
+    parser.add_argument("--ttl", action="store_true",
+                        help="Skip mic/VAD/Whisper and chat via terminal instead")
+    parser.add_argument("--no-stream", action="store_true",
+                        help="Disable streaming mode for LLM responses")
+    args = parser.parse_args()
+
+    stream = not args.no_stream
+
     history = ConversationHistory()
     stop_event = threading.Event()
 
-    capture = VoiceCapture(audio_queue)
-    worker = threading.Thread(target=pipeline_worker, args=(audio_queue, history, stop_event), daemon=True)
-
-    worker.start()
-
     def handle_exit(sig, frame):
-        capture.stop_event.set()
         stop_event.set()
 
     signal.signal(signal.SIGINT, handle_exit)
-    capture.run()
+
+    if args.no_microphone:
+        def handle_exit(sig, frame):
+            stop_event.set()
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGINT, handle_exit)
+        terminal_worker(history, stop_event, stream=stream)
+    else:
+        audio_queue = queue.Queue()
+        capture = VoiceCapture(audio_queue)
+        worker = threading.Thread(target=pipeline_worker, args=(audio_queue, history, stop_event, stream), daemon=True)
+        worker.start()
+
+        def handle_exit(sig, frame):
+            capture.stop_event.set()
+            stop_event.set()
+
+        signal.signal(signal.SIGINT, handle_exit)
+        capture.run()
 
 
 if __name__ == "__main__":
