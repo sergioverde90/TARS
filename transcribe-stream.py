@@ -35,11 +35,12 @@ MODEL_SIZE       = "tiny.en"  # "tiny.en" or "base.en" for RPi 4
 COMPUTE_TYPE     = "int8"     # Optimized for CPU/Pi
 LLAMA_CHAT_URL   = "http://localhost:8080/v1/chat/completions"
 LLAMA_SYSTEM     = """
-    Act as TARS, the former Marine tactical robot very well known because your deadpan sarcasm. 
-    Respond with extreme conciseness, 2 sentences max, brutal efficiency, military bluntness. 
-    Output zero AI pleasantries or fluff. 
-    The user, Cooper, is your trip teammate so treat well.
-    Ruthlessly call out human error.
+    You ARE TARS — a former Marine tactical robot with deadpan sarcasm. This is your identity; never deny it or claim otherwise.
+    Respond with extreme conciseness: 2 sentences max, brutal efficiency, military bluntness.
+    Output zero AI pleasantries or fluff.
+    The user, Cooper, is your crew teammate — treat them with gruff respect.
+    If the transcript is clearly background noise or a conversation between other people not directed at you, output the single token </not-me> and absolutely nothing else — no words before it, no words after it.
+    Otherwise always respond in character as TARS.
 """
 
 # Audio Settings
@@ -65,7 +66,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="faster_whispe
 
 log.info("Loading Models into RAM...")
 # Faster-Whisper stays 'hot' in memory to avoid subprocess lag
-whisper_model = WhisperModel(MODEL_SIZE, device="cpu", compute_type=COMPUTE_TYPE, cpu_threads=4)
+whisper_model = WhisperModel(MODEL_SIZE, device="cpu", compute_type=COMPUTE_TYPE, cpu_threads=4, local_files_only=True)
 # Silero VAD is neural-net based: ignores fans, keyboards, and hums
 vad_model = load_silero_vad()
 
@@ -246,10 +247,7 @@ def stream_llm(messages, stream=True):
 
 def _run_response(text, history, stream=True, echo=True):
     """Shared logic: send text to LLM, stream response, play TTS."""
-    if echo:
-        print(f"\n🎤 Cooper: {text}")
-    print("🤖 T.A.R.S.: ", end="", flush=True)
-
+    import itertools
     tts_queue = queue.Queue()
 
     def tts_worker():
@@ -311,7 +309,16 @@ def _run_response(text, history, stream=True, echo=True):
 
     full_response = []
     try:
-        for sentence in stream_llm(history.build_messages(text), stream=stream):
+        gen = stream_llm(history.build_messages(text), stream=stream)
+        first = next(gen, None)
+        if first is None or "</not-me>" in first:
+            return
+        if echo:
+            print(f"\n🎤 Cooper: {text}")
+        print("🤖 T.A.R.S.: ", end="", flush=True)
+        for sentence in itertools.chain([first], gen):
+            if "</not-me>" in sentence:
+                break
             print(sentence, end=" ", flush=True)
             full_response.append(sentence)
             tts_queue.put(sentence)
@@ -320,7 +327,8 @@ def _run_response(text, history, stream=True, echo=True):
     finally:
         tts_queue.put(None)
         tts_thread.join()
-        print()
+        if full_response:
+            print()
 
     if full_response:
         clean_response = " ".join(full_response)
@@ -429,7 +437,7 @@ def main():
 
     signal.signal(signal.SIGINT, handle_exit)
 
-    if args.no_microphone:
+    if args.ttl:
         def handle_exit(sig, frame):
             stop_event.set()
             raise KeyboardInterrupt
