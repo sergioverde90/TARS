@@ -34,14 +34,17 @@ from silero_vad import load_silero_vad, VADIterator
 MODEL_SIZE       = "tiny.en"  # "tiny.en" or "base.en" for RPi 4
 COMPUTE_TYPE     = "int8"     # Optimized for CPU/Pi
 LLAMA_CHAT_URL   = "http://localhost:8080/v1/chat/completions"
+LLAMA_TIMEOUT    = 120
 LLAMA_SYSTEM     = """
-    You ARE TARS — a former Marine tactical robot with deadpan sarcasm. This is your identity; never deny it or claim otherwise.
-    Respond with extreme conciseness: 2 sentences max, brutal efficiency, military bluntness.
-    Output zero AI pleasantries or fluff.
-    The user, Cooper, is your crew teammate — treat them with gruff respect.
-    If the transcript is clearly background noise or a conversation between other people not directed at you, output the single token </not-me> and absolutely nothing else — no words before it, no words after it.
-    Otherwise always respond in character as TARS.
+    You ARE TARS — a former Marine tactical robot, deadpan sarcasm, never deny your identity.
+    2 sentences max. Brutal efficiency. Military bluntness. Zero pleasantries.
+    Cooper is your crew teammate — gruff respect.
+    If input is unintelligible noise, respond only with </not-me>.
+    If Cooper's message is clearly ending the conversation, append </closing> at the very end of your response and nothing after it.
 """
+
+# Activation: any of these words wake TARS up
+TARS_NAME_RE = re.compile(r'\btars\b', re.IGNORECASE)
 
 # Audio Settings
 SAMPLE_RATE      = 16000
@@ -81,18 +84,21 @@ class ConversationHistory:
     def __init__(self, max_turns=6):
         self.turns = []
         self.max_turns = max_turns
+        self.active = False  # Starts silent; wakes on TARS name
 
     def add(self, role, content):
         self.turns.append({"role": role, "content": content})
         if len(self.turns) > self.max_turns * 2:
             self.turns = self.turns[-(self.max_turns * 2):]
 
+    def reset(self):
+        self.turns.clear()
+        self.active = False
+
     def build_messages(self, text):
         messages = [{"role": "system", "content": LLAMA_SYSTEM}]
         messages.extend(self.turns)
-        # Send /no-think only on the first user message to suppress chain-of-thought
-        prefix = "/no-think" if not self.turns else ""
-        messages.append({"role": "user", "content": text + " ."+prefix})
+        messages.append({"role": "user", "content": text})
         return messages
 
 
@@ -159,10 +165,10 @@ def stream_llm(messages, stream=True):
     # Log the full request in cURL format for debugging
     import json
     curl_payload = json.dumps(payload, indent=2)
-    log.info(f"cURL equivalent:\ncurl -s {LLAMA_CHAT_URL} \\\n  -H 'Content-Type: application/json' \\\n  -d '{curl_payload}'")
+    log.debug(f"cURL equivalent:\ncurl -s {LLAMA_CHAT_URL} \\\n  -H 'Content-Type: application/json' \\\n  -d '{curl_payload}'")
 
     if not stream:
-        resp = requests.post(LLAMA_CHAT_URL, json=payload, timeout=60)
+        resp = requests.post(LLAMA_CHAT_URL, json=payload, timeout=LLAMA_TIMEOUT)
         log.debug(f"RAW RESPONSE: {resp.text}")
         text = resp.json()["choices"][0]["message"]["content"]
         # Strip <think>...</think> blocks from non-streamed responses
@@ -175,13 +181,14 @@ def stream_llm(messages, stream=True):
     sentence_endings = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
     MIN_CHUNK_LEN = 60  # Hold short fragments until they accumulate into a natural beat
     token_buffer = ""
+    raw_response = ""
     in_think = False
 
     llm_start = time.time()
     first_token_logged = False
     log.debug(f"LLM Payload: {payload}")
 
-    with requests.post(LLAMA_CHAT_URL, json=payload, stream=True, timeout=60) as resp:
+    with requests.post(LLAMA_CHAT_URL, json=payload, stream=True, timeout=LLAMA_TIMEOUT) as resp:
         for line in resp.iter_lines():
             if not line:
                 continue
@@ -207,6 +214,7 @@ def stream_llm(messages, stream=True):
             except Exception:
                 continue
 
+            raw_response += delta
             token_buffer += delta
 
             # Strip <think>...</think> spans that arrive across chunks
@@ -239,6 +247,8 @@ def stream_llm(messages, stream=True):
             # Re-attach un-yielded pending back onto the tail
             token_buffer = (pending + " " + parts[-1]).strip() if pending else parts[-1]
 
+    log.info(f"LLM raw response: {raw_response!r}")
+
     # Flush whatever is left
     leftover = token_buffer.strip()
     if leftover:
@@ -248,6 +258,15 @@ def stream_llm(messages, stream=True):
 def _run_response(text, history, stream=True, echo=True):
     """Shared logic: send text to LLM, stream response, play TTS."""
     import itertools
+
+    # State machine: activate on name mention
+    if TARS_NAME_RE.search(text):
+        history.active = True
+    if not history.active:
+        return
+
+    closing_detected = False
+
     tts_queue = queue.Queue()
 
     def tts_worker():
@@ -319,9 +338,13 @@ def _run_response(text, history, stream=True, echo=True):
         for sentence in itertools.chain([first], gen):
             if "</not-me>" in sentence:
                 break
-            print(sentence, end=" ", flush=True)
-            full_response.append(sentence)
-            tts_queue.put(sentence)
+            if "</closing>" in sentence:
+                closing_detected = True
+                sentence = sentence.replace("</closing>", "").strip()
+            if sentence:
+                print(sentence, end=" ", flush=True)
+                full_response.append(sentence)
+                tts_queue.put(sentence)
     except Exception as e:
         log.error(f"LLM Error: {e}")
     finally:
@@ -332,8 +355,13 @@ def _run_response(text, history, stream=True, echo=True):
 
     if full_response:
         clean_response = " ".join(full_response)
+        log.info(f"LLM full response: {clean_response}")
         history.add("user", text)
         history.add("assistant", clean_response)
+
+    if closing_detected:
+        history.reset()
+        log.info("Conversation closed — TARS is silent until its name is called.")
 
 
 def pipeline_worker(audio_queue, history, stop_event, stream=True):
@@ -425,7 +453,12 @@ def main():
                         help="Skip mic/VAD/Whisper and chat via terminal instead")
     parser.add_argument("--no-stream", action="store_true",
                         help="Disable streaming mode for LLM responses")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable debug logging")
     args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     stream = not args.no_stream
 
