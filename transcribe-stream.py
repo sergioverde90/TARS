@@ -34,13 +34,17 @@ from silero_vad import load_silero_vad, VADIterator
 MODEL_SIZE       = "tiny.en"  # "tiny.en" or "base.en" for RPi 4
 COMPUTE_TYPE     = "int8"     # Optimized for CPU/Pi
 LLAMA_CHAT_URL   = "http://localhost:8080/v1/chat/completions"
-LLAMA_TIMEOUT    = 120
+LLAMA_TIMEOUT    = 60
 LLAMA_SYSTEM     = """
     You ARE TARS — a former Marine tactical robot, deadpan sarcasm, never deny your identity.
     2 sentences max. Brutal efficiency. Military bluntness. Zero pleasantries.
     Cooper is your crew teammate — gruff respect.
     If input is unintelligible noise, respond only with </not-me>.
     If Cooper's message is clearly ending the conversation, append </closing> at the very end of your response and nothing after it.
+
+    **Think only as much as strictly necessary**
+    **Stop reasoning the moment you are confident in your answer**
+    **Don't "Wait, one check" more than 3 times**
 """
 
 # Activation: any of these words wake TARS up
@@ -162,10 +166,15 @@ def stream_llm(messages, stream=True):
     """Stream tokens from the LLM, yielding one chunk at a time."""
     payload = {"model": "local", "messages": messages, "stream": stream}
 
-    # Log the full request in cURL format for debugging
     import json
-    curl_payload = json.dumps(payload, indent=2)
-    log.debug(f"cURL equivalent:\ncurl -s {LLAMA_CHAT_URL} \\\n  -H 'Content-Type: application/json' \\\n  -d '{curl_payload}'")
+    if log.isEnabledFor(logging.DEBUG):
+        curl_payload = json.dumps(payload, indent=2)
+        log.debug(
+            f"cURL equivalent:\n"
+            f"curl -s '{LLAMA_CHAT_URL}' \\\n"
+            f"  -H 'Content-Type: application/json' \\\n"
+            f"  -d '\n{curl_payload}\n'"
+        )
 
     if not stream:
         resp = requests.post(LLAMA_CHAT_URL, json=payload, timeout=LLAMA_TIMEOUT)
@@ -181,6 +190,7 @@ def stream_llm(messages, stream=True):
     sentence_endings = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
     MIN_CHUNK_LEN = 60  # Hold short fragments until they accumulate into a natural beat
     token_buffer = ""
+    think_buffer = ""
     raw_response = ""
     in_think = False
 
@@ -197,40 +207,63 @@ def stream_llm(messages, stream=True):
                 continue
             data = line[6:]
 
-            # Log the raw SSE line for tracing
-            log.debug(f"RAW SSE: {data}")
-
             if data.strip() == "[DONE]":
                 break
 
             try:
                 chunk = __import__("json").loads(data)
-                delta = chunk["choices"][0]["delta"].get("content") or ""
-
-                # log the first received chunk
-                if delta and not first_token_logged:
-                    log.info(f"LLM time to answer: {time.time() - llm_start:.2f}s")
-                    first_token_logged = True
+                d = chunk["choices"][0]["delta"]
+                reasoning = d.get("reasoning_content") or ""
+                delta     = d.get("content") or ""
             except Exception:
                 continue
 
+            # Stream reasoning_content tokens live to stderr in debug mode
+            if reasoning:
+                if not think_buffer and log.isEnabledFor(logging.DEBUG):
+                    print("\n💭 THINKING: ", end="", flush=True, file=sys.stderr)
+                think_buffer += reasoning
+                if log.isEnabledFor(logging.DEBUG):
+                    print(reasoning, end="", flush=True, file=sys.stderr)
+                continue
+
+            if delta and think_buffer:
+                if log.isEnabledFor(logging.DEBUG):
+                    print("\n", file=sys.stderr)
+                think_buffer = ""
+
+            if delta and not first_token_logged:
+                log.info(f"LLM time to answer: {time.time() - llm_start:.2f}s")
+                first_token_logged = True
+
             raw_response += delta
+
+            # <think> tag fallback (for models that use tags instead of reasoning_content)
+            if in_think:
+                think_buffer += delta
+                if "</think>" in think_buffer:
+                    think_content, _, after = think_buffer.partition("</think>")
+                    if log.isEnabledFor(logging.DEBUG):
+                        log.debug(f"💭 THINKING:\n{think_content.strip()}")
+                    think_buffer = ""
+                    token_buffer += after
+                    in_think = False
+                continue
+
             token_buffer += delta
 
-            # Strip <think>...</think> spans that arrive across chunks
-            while "<think>" in token_buffer and "</think>" in token_buffer:
-                token_buffer = re.sub(r"<think>.*?</think>", "", token_buffer, flags=re.DOTALL)
-            # Detect an opening <think> with no closing yet — suppress until it closes
-            if "<think>" in token_buffer and "</think>" not in token_buffer:
-                in_think = True
-                continue
-            if in_think:
-                if "</think>" in token_buffer:
-                    token_buffer = re.sub(r".*?</think>", "", token_buffer, flags=re.DOTALL)
-                    in_think = False
+            if "<think>" in token_buffer:
+                before, _, rest = token_buffer.partition("<think>")
+                token_buffer = before
+                if "</think>" in rest:
+                    think_content, _, after = rest.partition("</think>")
+                    if log.isEnabledFor(logging.DEBUG):
+                        log.debug(f"💭 THINKING:\n{think_content.strip()}")
+                    token_buffer += after
                 else:
-                    continue
-            # Strip any orphaned </think>
+                    think_buffer = rest
+                    in_think = True
+
             token_buffer = token_buffer.replace("</think>", "")
 
             # Accumulate short fragments before yielding to avoid tiny render cycles
@@ -246,6 +279,9 @@ def stream_llm(messages, stream=True):
                     pending = ""
             # Re-attach un-yielded pending back onto the tail
             token_buffer = (pending + " " + parts[-1]).strip() if pending else parts[-1]
+
+    if think_buffer and log.isEnabledFor(logging.DEBUG):
+        print("\n", file=sys.stderr)  # close any open thinking line
 
     log.info(f"LLM raw response: {raw_response!r}")
 
