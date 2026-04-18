@@ -78,7 +78,6 @@ public class TarsChatService {
 
     public Flux<ServerSentEvent<String>> stream(ChatCompletionRequest req) {
         List<ChatMessage> messages = convertMessages(req.messages());
-        log.info("Converted messages: {}", messages);
         Sinks.Many<ServerSentEvent<String>> sink = Sinks.many().unicast().onBackpressureBuffer();
         streamRound(messages, sink, 0);
         return sink.asFlux();

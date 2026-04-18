@@ -199,9 +199,9 @@ def stream_llm(messages, stream=True):
             if not line:
                 continue
             line = line.decode("utf-8")
-            if not line.startswith("data: "):
+            if not line.startswith("data:"):
                 continue
-            data = line[6:]
+            data = line[5:].lstrip()
 
             if data.strip() == "[DONE]":
                 break
