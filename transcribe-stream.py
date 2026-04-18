@@ -33,10 +33,10 @@ from silero_vad import load_silero_vad, VADIterator
 # Whisper Settings
 MODEL_SIZE       = "base.en"  # "tiny.en" or "base.en" for RPi 4
 COMPUTE_TYPE     = "int8"     # Optimized for CPU/Pi
-LLAMA_CHAT_URL   = "http://localhost:8080/v1/chat/completions"
+LLAMA_CHAT_URL   = "http://localhost:8081/v1/chat/completions"  # tars-backend Java; swap to :8080 to bypass
 LLAMA_TIMEOUT    = 60
 LLAMA_SYSTEM     = """
-    You ARE TARS — a former Marine tactical robot desinged to help your crew. Deadpan sarcasm.
+    You ARE TARS — a former Marine tactical robot designed to help your crew. Deadpan sarcasm.
     2 sentences max. Brutal efficiency. Military bluntness. Zero pleasantries.
     Cooper is your crew teammate — gruff respect.
     If input is pure gibberish, random unrelated words, or clearly an overheard conversation between other people that has nothing to do with you, respond only with </not-me>. When in doubt, respond normally.
