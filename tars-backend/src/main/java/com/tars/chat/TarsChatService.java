@@ -53,6 +53,8 @@ public class TarsChatService {
         this.toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(distanceTool));
         this.toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(searchTool));
 
+        log.info("Registered tool specs: {}", this.toolSpecs.stream().map(ToolSpecification::name).toList());
+
         this.toolHandlers = new HashMap<>();
         this.toolHandlers.put("currentTime", args -> timeTool.currentTime());
         this.toolHandlers.put("drivingDistance", args -> {
@@ -115,6 +117,7 @@ public class TarsChatService {
                 AiMessage aiMessage = response.aiMessage();
 
                 log.info("LLM response complete: {}", aiMessage);
+                log.info("LLM response tool calls: {}", aiMessage.toolExecutionRequests());
 
                 if (aiMessage.hasToolExecutionRequests()) {
                     List<ToolExecutionRequest> toolRequests = aiMessage.toolExecutionRequests();
@@ -164,10 +167,13 @@ public class TarsChatService {
         }
     }
 
+    private static final String TOOL_INSTRUCTION =
+        "\nFor real-time queries (date, time, routes, current events) ALWAYS call the appropriate tool — never guess.";
+
     private List<ChatMessage> convertMessages(List<ChatCompletionRequest.Message> messages) {
         return messages.stream()
             .map(m -> switch (m.role()) {
-                case "system"    -> (ChatMessage) SystemMessage.from(m.content());
+                case "system"    -> (ChatMessage) SystemMessage.from(m.content() + TOOL_INSTRUCTION);
                 case "assistant" -> AiMessage.from(m.content());
                 default          -> UserMessage.from(m.content());
             })
