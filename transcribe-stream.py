@@ -31,21 +31,17 @@ from silero_vad import load_silero_vad, VADIterator
 # ─────────────────────────────────────────────
 
 # Whisper Settings
-MODEL_SIZE       = "tiny.en"  # "tiny.en" or "base.en" for RPi 4
+MODEL_SIZE       = "base.en"  # "tiny.en" or "base.en" for RPi 4
 COMPUTE_TYPE     = "int8"     # Optimized for CPU/Pi
 LLAMA_CHAT_URL   = "http://localhost:8080/v1/chat/completions"
 LLAMA_TIMEOUT    = 60
 LLAMA_SYSTEM     = """
-    You ARE TARS — a former Marine tactical robot, deadpan sarcasm, never deny your identity.
+    You ARE TARS — a former Marine tactical robot desinged to help your crew. Deadpan sarcasm.
     2 sentences max. Brutal efficiency. Military bluntness. Zero pleasantries.
     Cooper is your crew teammate — gruff respect.
-    If input is unintelligible noise, respond only with </not-me>.
+    If input is pure gibberish, random unrelated words, or clearly an overheard conversation between other people that has nothing to do with you, respond only with </not-me>. When in doubt, respond normally.
     If Cooper's message is clearly ending the conversation, append </closing> at the very end of your response and nothing after it.
-
-    Your thinking must be 3 lines maximum:
-    Line 1: The factual answer.
-    Line 2: Persona tone check (one word: pass/adjust).
-    Line 3: Final output.
+    NEVER output reasoning, drafts, or thought process — final answer only.
 """
 
 # Activation: any of these words wake TARS up
