@@ -10,7 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.client.RestClient;
 
 import java.util.List;
 import java.util.Map;
@@ -20,13 +20,13 @@ public class DistanceTool {
 
     private static final Logger log = LoggerFactory.getLogger(DistanceTool.class);
 
-    private final WebClient http;
+    private final RestClient http;
     private final String apiKey;
     private final ObjectMapper mapper = new ObjectMapper();
 
     public DistanceTool(TarsProperties props) {
         this.apiKey = props.openrouteservice().apiKey();
-        this.http = WebClient.builder()
+        this.http = RestClient.builder()
             .baseUrl(props.openrouteservice().baseUrl())
             .defaultHeader("Authorization", apiKey)
             .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
@@ -52,10 +52,9 @@ public class DistanceTool {
             String response = http.post()
                 .uri("/v2/directions/driving-car")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(body)
+                .body(body)
                 .retrieve()
-                .bodyToMono(String.class)
-                .block();
+                .body(String.class);
 
             JsonNode root = mapper.readTree(response);
             JsonNode summary = root.path("routes").get(0).path("summary");
@@ -80,8 +79,7 @@ public class DistanceTool {
                 .queryParam("size", 1)
                 .build())
             .retrieve()
-            .bodyToMono(String.class)
-            .block();
+            .body(String.class);
 
         JsonNode features = mapper.readTree(response).path("features");
         if (features.isEmpty()) throw new RuntimeException("Place not found: " + place);

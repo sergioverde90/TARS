@@ -19,13 +19,11 @@ import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
-import reactor.core.publisher.Sinks;
-import reactor.core.scheduler.Schedulers;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -37,6 +35,7 @@ public class TarsChatService {
 
     private static final Logger log = LoggerFactory.getLogger(TarsChatService.class);
     private static final int MAX_TOOL_ITERATIONS = 5;
+    private static final long SSE_TIMEOUT = 300_000L;
 
     private final ChatModel chatModel;
     private final StreamingChatModel streamingModel;
@@ -54,7 +53,6 @@ public class TarsChatService {
         this.chatModel = chatModel;
         this.streamingModel = streamingModel;
 
-        // toolSpecificationsFrom takes a single Object in 1.0.0-rc1
         this.toolSpecs = new ArrayList<>();
         this.toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(timeTool));
         this.toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(distanceTool));
@@ -85,51 +83,49 @@ public class TarsChatService {
         });
     }
 
-    public Mono<ChatCompletionResponse> chat(ChatCompletionRequest req) {
-        return Mono.fromCallable(() -> {
-            List<ChatMessage> messages = new ArrayList<>(convertMessages(req.messages()));
+    public ChatCompletionResponse chat(ChatCompletionRequest req) {
+        List<ChatMessage> messages = new ArrayList<>(convertMessages(req.messages()));
 
-            for (int i = 0; i <= MAX_TOOL_ITERATIONS; i++) {
-                ChatRequest request = ChatRequest.builder()
-                    .messages(messages)
-                    .toolSpecifications(toolSpecs)
-                    .build();
+        for (int i = 0; i <= MAX_TOOL_ITERATIONS; i++) {
+            ChatRequest request = ChatRequest.builder()
+                .messages(messages)
+                .toolSpecifications(toolSpecs)
+                .build();
 
-                ChatResponse response = chatModel.chat(request);
-                AiMessage aiMessage = response.aiMessage();
+            ChatResponse response = chatModel.chat(request);
+            AiMessage aiMessage = response.aiMessage();
 
-                if (!aiMessage.hasToolExecutionRequests()) {
-                    return ChatCompletionResponse.of(aiMessage.text());
-                }
-
-                log.info("Tool calls: {}", aiMessage.toolExecutionRequests().stream()
-                    .map(ToolExecutionRequest::name).toList());
-
-                messages.add(aiMessage);
-                for (ToolExecutionRequest toolReq : aiMessage.toolExecutionRequests()) {
-                    String result = executeToolCall(toolReq);
-                    log.info("Tool '{}' → {}", toolReq.name(), result);
-                    messages.add(ToolExecutionResultMessage.from(toolReq, result));
-                }
+            if (!aiMessage.hasToolExecutionRequests()) {
+                return ChatCompletionResponse.of(aiMessage.text());
             }
 
-            log.warn("Max tool iterations reached");
-            return ChatCompletionResponse.of("I ran out of tool iterations. Try again.");
-        }).subscribeOn(Schedulers.boundedElastic());
+            log.info("Tool calls: {}", aiMessage.toolExecutionRequests().stream()
+                .map(ToolExecutionRequest::name).toList());
+
+            messages.add(aiMessage);
+            for (ToolExecutionRequest toolReq : aiMessage.toolExecutionRequests()) {
+                String result = executeToolCall(toolReq);
+                log.info("Tool '{}' → {}", toolReq.name(), result);
+                messages.add(ToolExecutionResultMessage.from(toolReq, result));
+            }
+        }
+
+        log.warn("Max tool iterations reached");
+        return ChatCompletionResponse.of("I ran out of tool iterations. Try again.");
     }
 
-    public Flux<ServerSentEvent<String>> stream(ChatCompletionRequest req) {
+    public SseEmitter stream(ChatCompletionRequest req) {
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
         List<ChatMessage> messages = convertMessages(req.messages());
-        Sinks.Many<ServerSentEvent<String>> sink = Sinks.many().unicast().onBackpressureBuffer();
-        streamRound(messages, sink, 0);
-        return sink.asFlux();
+        streamRound(messages, emitter, 0);
+        return emitter;
     }
 
-    private void streamRound(List<ChatMessage> messages, Sinks.Many<ServerSentEvent<String>> sink, int depth) {
+    private void streamRound(List<ChatMessage> messages, SseEmitter emitter, int depth) {
         if (depth > MAX_TOOL_ITERATIONS) {
             log.warn("Max tool iterations reached");
-            sink.tryEmitNext(sse("[DONE]"));
-            sink.tryEmitComplete();
+            sendEvent(emitter, "[DONE]");
+            emitter.complete();
             return;
         }
 
@@ -146,7 +142,7 @@ public class TarsChatService {
             public void onPartialResponse(String token) {
                 try {
                     String json = mapper.writeValueAsString(ChatCompletionChunk.contentDelta(token));
-                    sink.tryEmitNext(sse(json));
+                    sendEvent(emitter, json);
                 } catch (Exception e) {
                     log.error("Serialization error", e);
                 }
@@ -172,15 +168,15 @@ public class TarsChatService {
                         updated.add(ToolExecutionResultMessage.from(req, result));
                     }
 
-                    streamRound(updated, sink, depth + 1);
+                    streamRound(updated, emitter, depth + 1);
                 } else {
                     try {
                         String json = mapper.writeValueAsString(ChatCompletionChunk.finish());
-                        sink.tryEmitNext(sse(json));
-                        sink.tryEmitNext(sse("[DONE]"));
-                        sink.tryEmitComplete();
+                        sendEvent(emitter, json);
+                        sendEvent(emitter, "[DONE]");
+                        emitter.complete();
                     } catch (Exception e) {
-                        sink.tryEmitError(e);
+                        emitter.completeWithError(e);
                     }
                 }
             }
@@ -188,7 +184,7 @@ public class TarsChatService {
             @Override
             public void onError(Throwable error) {
                 log.error("LLM error", error);
-                sink.tryEmitError(error);
+                emitter.completeWithError(error);
             }
         });
     }
@@ -220,7 +216,11 @@ public class TarsChatService {
             .toList();
     }
 
-    private static ServerSentEvent<String> sse(String data) {
-        return ServerSentEvent.builder(data).build();
+    private void sendEvent(SseEmitter emitter, String data) {
+        try {
+            emitter.send(SseEmitter.event().data(data, MediaType.TEXT_PLAIN));
+        } catch (IOException e) {
+            log.error("Failed to send SSE event", e);
+        }
     }
 }

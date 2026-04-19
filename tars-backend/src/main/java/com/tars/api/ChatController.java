@@ -4,10 +4,8 @@ import com.tars.api.dto.ChatCompletionRequest;
 import com.tars.chat.TarsChatService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import reactor.core.publisher.Mono;
 
 @RestController
 public class ChatController {
@@ -21,14 +19,12 @@ public class ChatController {
     }
 
     @PostMapping("/v1/chat/completions")
-    public Mono<ResponseEntity<?>> chat(@RequestBody ChatCompletionRequest req) {
+    public Object chat(@RequestBody ChatCompletionRequest req) {
         log.info("Chat request: {} messages, stream={}", req.messages().size(), req.isStream());
         if (req.isStream()) {
-            return Mono.just(ResponseEntity.ok()
-                .contentType(MediaType.TEXT_EVENT_STREAM)
-                .body(chatService.stream(req)));
+            return chatService.stream(req);
         }
-        return chatService.chat(req).map(ResponseEntity::ok);
+        return ResponseEntity.ok(chatService.chat(req));
     }
 
     @GetMapping("/health")

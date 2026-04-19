@@ -9,7 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.client.RestClient;
 
 import java.util.Map;
 
@@ -18,13 +18,13 @@ public class SearchTool {
 
     private static final Logger log = LoggerFactory.getLogger(SearchTool.class);
 
-    private final WebClient http;
+    private final RestClient http;
     private final String apiKey;
     private final ObjectMapper mapper = new ObjectMapper();
 
     public SearchTool(TarsProperties props) {
         this.apiKey = props.tavily().apiKey();
-        this.http = WebClient.builder()
+        this.http = RestClient.builder()
             .baseUrl(props.tavily().baseUrl())
             .build();
     }
@@ -42,10 +42,9 @@ public class SearchTool {
             String response = http.post()
                 .uri("/search")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(body)
+                .body(body)
                 .retrieve()
-                .bodyToMono(String.class)
-                .block();
+                .body(String.class);
 
             JsonNode results = mapper.readTree(response).path("results");
             if (results.isEmpty()) return "No results found for: " + query;
