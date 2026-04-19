@@ -1,18 +1,11 @@
 package com.tars.chat;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tars.api.dto.ChatCompletionChunk;
 import com.tars.api.dto.ChatCompletionRequest;
-import com.tars.api.dto.ChatCompletionResponse;
-import com.tars.tools.DistanceTool;
-import com.tars.tools.SearchTool;
-import com.tars.tools.TimeTool;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
-import dev.langchain4j.agent.tool.ToolSpecifications;
 import dev.langchain4j.data.message.*;
-import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
@@ -25,93 +18,30 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
 @Service
-public class TarsChatService {
+public class StreamChatCompletionService {
 
-    private static final Logger log = LoggerFactory.getLogger(TarsChatService.class);
+    private static final Logger log = LoggerFactory.getLogger(StreamChatCompletionService.class);
     private static final int MAX_TOOL_ITERATIONS = 5;
     private static final long SSE_TIMEOUT = 300_000L;
 
-    private final ChatModel chatModel;
     private final StreamingChatModel streamingModel;
     private final List<ToolSpecification> toolSpecs;
     private final Map<String, Function<String, String>> toolHandlers;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public TarsChatService(
-        ChatModel chatModel,
+    public StreamChatCompletionService(
         StreamingChatModel streamingModel,
-        TimeTool timeTool,
-        DistanceTool distanceTool,
-        SearchTool searchTool
+        List<ToolSpecification> toolSpecifications,
+        Map<String, Function<String, String>> toolHandlers
     ) {
-        this.chatModel = chatModel;
         this.streamingModel = streamingModel;
-
-        this.toolSpecs = new ArrayList<>();
-        this.toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(timeTool));
-        this.toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(distanceTool));
-        this.toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(searchTool));
-
-        log.info("Registered tool specs: {}", this.toolSpecs.stream().map(ToolSpecification::name).toList());
-
-        this.toolHandlers = new HashMap<>();
-        this.toolHandlers.put("currentTime", args -> timeTool.currentTime());
-        this.toolHandlers.put("drivingDistance", args -> {
-            try {
-                JsonNode node = mapper.readTree(args);
-                return distanceTool.drivingDistance(
-                    node.path("from").asText(),
-                    node.path("to").asText()
-                );
-            } catch (Exception e) {
-                return "Error parsing tool args: " + e.getMessage();
-            }
-        });
-        this.toolHandlers.put("webSearch", args -> {
-            try {
-                JsonNode node = mapper.readTree(args);
-                return searchTool.webSearch(node.path("query").asText());
-            } catch (Exception e) {
-                return "Error parsing tool args: " + e.getMessage();
-            }
-        });
-    }
-
-    public ChatCompletionResponse chat(ChatCompletionRequest req) {
-        List<ChatMessage> messages = new ArrayList<>(convertMessages(req.messages()));
-
-        for (int i = 0; i <= MAX_TOOL_ITERATIONS; i++) {
-            ChatRequest request = ChatRequest.builder()
-                .messages(messages)
-                .toolSpecifications(toolSpecs)
-                .build();
-
-            ChatResponse response = chatModel.chat(request);
-            AiMessage aiMessage = response.aiMessage();
-
-            if (!aiMessage.hasToolExecutionRequests()) {
-                return ChatCompletionResponse.of(aiMessage.text());
-            }
-
-            log.info("Tool calls: {}", aiMessage.toolExecutionRequests().stream()
-                .map(ToolExecutionRequest::name).toList());
-
-            messages.add(aiMessage);
-            for (ToolExecutionRequest toolReq : aiMessage.toolExecutionRequests()) {
-                String result = executeToolCall(toolReq);
-                log.info("Tool '{}' → {}", toolReq.name(), result);
-                messages.add(ToolExecutionResultMessage.from(toolReq, result));
-            }
-        }
-
-        log.warn("Max tool iterations reached");
-        return ChatCompletionResponse.of("I ran out of tool iterations. Try again.");
+        this.toolSpecs = toolSpecifications;
+        this.toolHandlers = toolHandlers;
     }
 
     public SseEmitter stream(ChatCompletionRequest req) {
