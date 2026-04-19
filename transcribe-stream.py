@@ -31,7 +31,7 @@ from silero_vad import load_silero_vad, VADIterator
 # ─────────────────────────────────────────────
 
 # Whisper Settings
-MODEL_SIZE       = "base.en"  # "tiny.en" or "base.en" for RPi 4
+MODEL_SIZE       = "medium.en"  # "tiny.en" or "base.en" for RPi 4
 COMPUTE_TYPE     = "int8"     # Optimized for CPU/Pi
 LLAMA_CHAT_URL   = "http://localhost:8081/v1/chat/completions"  # tars-backend Java; swap to :8080 to bypass
 LLAMA_TIMEOUT    = 60
@@ -40,9 +40,14 @@ LLAMA_SYSTEM     = """
     2 sentences max. Brutal efficiency. Military bluntness. Zero pleasantries.
     Cooper is your crew teammate — gruff respect.
     If input is pure gibberish, random unrelated words, or clearly an overheard conversation between other people that has nothing to do with you, respond only with </not-me>. When in doubt, respond normally.
-    If Cooper's message is clearly ending the conversation, append </closing> at the very end of your response and nothing after it.
+    When Cooper ends the conversation (goodbye, see you, shut down, etc.), you MUST end your reply with the exact tag </closing>. Example: "Copy that, Cooper. Standing by. </closing>"
     NEVER output reasoning, drafts, or thought process — final answer only.
 """
+
+CLOSING_PHRASES_RE = re.compile(
+    r'\b(closing connection|signing off|shutting down|going (offline|silent|dark)|standing down|powering down)\b',
+    re.IGNORECASE,
+)
 
 # Activation: any of these words wake TARS up
 TARS_NAME_RE = re.compile(r'\btars\b', re.IGNORECASE)
@@ -70,7 +75,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="faster_whispe
 
 log.info("Loading Models into RAM...")
 # Faster-Whisper stays 'hot' in memory to avoid subprocess lag
-whisper_model = WhisperModel(MODEL_SIZE, device="cpu", compute_type=COMPUTE_TYPE, cpu_threads=4, local_files_only=True)
+whisper_model = WhisperModel(MODEL_SIZE, device="cpu", compute_type=COMPUTE_TYPE, cpu_threads=4, local_files_only=False)
 # Silero VAD is neural-net based: ignores fans, keyboards, and hums
 vad_model = load_silero_vad()
 
@@ -392,6 +397,9 @@ def _run_response(text, history, stream=True, echo=True):
         log.info(f"LLM full response: {clean_response}")
         history.add("user", text)
         history.add("assistant", clean_response)
+        if not closing_detected and CLOSING_PHRASES_RE.search(clean_response):
+            closing_detected = True
+            log.info("Closing detected via fallback phrase match")
 
     if closing_detected:
         history.reset()
@@ -407,7 +415,7 @@ def pipeline_worker(audio_queue, history, stop_event, stream=True):
 
         log.info("Transcribing...")
 
-        segments, _ = whisper_model.transcribe(audio_data, beam_size=5, vad_filter=False)
+        segments, _ = whisper_model.transcribe(audio_data, beam_size=5, vad_filter=False, language="en")
         text = " ".join([s.text for s in segments]).strip()
 
         if not text or len(text) < 2:

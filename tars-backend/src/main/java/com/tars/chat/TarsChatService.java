@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tars.api.dto.ChatCompletionChunk;
 import com.tars.api.dto.ChatCompletionRequest;
+import com.tars.api.dto.ChatCompletionResponse;
 import com.tars.tools.DistanceTool;
 import com.tars.tools.SearchTool;
 import com.tars.tools.TimeTool;
@@ -11,6 +12,7 @@ import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.agent.tool.ToolSpecifications;
 import dev.langchain4j.data.message.*;
+import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
@@ -20,7 +22,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -34,17 +38,20 @@ public class TarsChatService {
     private static final Logger log = LoggerFactory.getLogger(TarsChatService.class);
     private static final int MAX_TOOL_ITERATIONS = 5;
 
+    private final ChatModel chatModel;
     private final StreamingChatModel streamingModel;
     private final List<ToolSpecification> toolSpecs;
     private final Map<String, Function<String, String>> toolHandlers;
     private final ObjectMapper mapper = new ObjectMapper();
 
     public TarsChatService(
+        ChatModel chatModel,
         StreamingChatModel streamingModel,
         TimeTool timeTool,
         DistanceTool distanceTool,
         SearchTool searchTool
     ) {
+        this.chatModel = chatModel;
         this.streamingModel = streamingModel;
 
         // toolSpecificationsFrom takes a single Object in 1.0.0-rc1
@@ -76,6 +83,39 @@ public class TarsChatService {
                 return "Error parsing tool args: " + e.getMessage();
             }
         });
+    }
+
+    public Mono<ChatCompletionResponse> chat(ChatCompletionRequest req) {
+        return Mono.fromCallable(() -> {
+            List<ChatMessage> messages = new ArrayList<>(convertMessages(req.messages()));
+
+            for (int i = 0; i <= MAX_TOOL_ITERATIONS; i++) {
+                ChatRequest request = ChatRequest.builder()
+                    .messages(messages)
+                    .toolSpecifications(toolSpecs)
+                    .build();
+
+                ChatResponse response = chatModel.chat(request);
+                AiMessage aiMessage = response.aiMessage();
+
+                if (!aiMessage.hasToolExecutionRequests()) {
+                    return ChatCompletionResponse.of(aiMessage.text());
+                }
+
+                log.info("Tool calls: {}", aiMessage.toolExecutionRequests().stream()
+                    .map(ToolExecutionRequest::name).toList());
+
+                messages.add(aiMessage);
+                for (ToolExecutionRequest toolReq : aiMessage.toolExecutionRequests()) {
+                    String result = executeToolCall(toolReq);
+                    log.info("Tool '{}' → {}", toolReq.name(), result);
+                    messages.add(ToolExecutionResultMessage.from(toolReq, result));
+                }
+            }
+
+            log.warn("Max tool iterations reached");
+            return ChatCompletionResponse.of("I ran out of tool iterations. Try again.");
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     public Flux<ServerSentEvent<String>> stream(ChatCompletionRequest req) {

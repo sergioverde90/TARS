@@ -20,6 +20,12 @@ spin up llama-server
 llama-server -m ../ai/models/Qwen3.5-9B-Q4_K_M.gguf --reasoning-budget 0 -c 1024 --cache-reuse 256 --reasoning-format none
 ```
 
+# How to start
+
+```bash
+llama-server -m /path/to/model.gguf --reasoning-budget 0 -c 100000 --jinja
+```
+
 # TODO
 
 - [x] make sure the script is cleaning all the *.wav files when finish
