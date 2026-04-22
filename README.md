@@ -14,16 +14,54 @@ Quick sanity check — after installing, verify the key ones:
 bashpython -c "import faster_whisper, silero_vad, pyaudio, torch; print('OK')"
 sox --version
 
-spin up llama-server
+## SPIN UP LLAMA SERVER - ALL PARAMETERS INDICATED
 
 ```bash
-llama-server -m ../ai/models/Qwen3.5-9B-Q4_K_M.gguf --reasoning-budget 0 -c 1024 --cache-reuse 256 --reasoning-format none
+llama-server \
+  -m /Users/sergio/projects/ai/models/Qwen3.5-9B-Q4_K_M.gguf \
+  -c 100000 \
+  --jinja \
+  --threads 10 \
+  --temp 0.8 \
+  --min-p 0.06 \
+  --presence-penalty 1.2 \
+  --repeat-penalty 1.05 \
+  --reasoning-budget-message "[Reasoning budget exhausted. Getting the final answer...]"
 ```
 
-# How to start
+## SPIN UP LLAMA SERVER - MINIMAL PARAMETERS + COMPLETION API
 
 ```bash
-llama-server -m /path/to/model.gguf --reasoning-budget 0 -c 100000 --jinja
+llama-server \
+  -m /Users/sergio/projects/ai/models/Qwen3.5-9B-Q4_K_M.gguf \
+  -c 100000 \
+  --jinja \
+  --threads 10 \
+  --reasoning-budget-message "[Reasoning budget exhausted. Getting the final answer...]"
+```
+
+```bash
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "<your-system-prompt>"
+    },
+    {
+      "role": "user",
+      "content": "solve this summation: $$ \\sum\\limits_{i=0}^{n} \\sum\\limits_{j=i}^{n} c $$"
+    }
+  ],
+  "stream": false,
+  "temperature": 0.8,
+  "min_p": 0.06,
+  "presence_penalty": 1.2,
+  "repeat_penalty": 1.05,
+  "thinking_budget_tokens": 512,
+  "chat_template_kwargs": {
+    "enable_thinking": true
+  }
+}
 ```
 
 # TODO

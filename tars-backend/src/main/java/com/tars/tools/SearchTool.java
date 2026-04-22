@@ -33,7 +33,6 @@ public class SearchTool {
     public String webSearch(@P("search query") String query) {
         try {
             Map<String, Object> body = Map.of(
-                "api_key", apiKey,
                 "query", query,
                 "max_results", 3,
                 "search_depth", "basic"
@@ -42,6 +41,7 @@ public class SearchTool {
             String response = http.post()
                 .uri("/search")
                 .contentType(MediaType.APPLICATION_JSON)
+                .header("Authorization", "Bearer " + apiKey)
                 .body(body)
                 .retrieve()
                 .body(String.class);
