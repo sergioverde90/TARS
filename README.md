@@ -14,6 +14,11 @@ Quick sanity check — after installing, verify the key ones:
 bashpython -c "import faster_whisper, silero_vad, pyaudio, torch; print('OK')"
 sox --version
 
+## Related doc
+
+* https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
+* https://huggingface.co/unsloth/Qwen3.5-9B-GGUF
+
 ## SPIN UP LLAMA SERVER - ALL PARAMETERS INDICATED
 
 ```bash
@@ -64,13 +69,15 @@ llama-server \
 }
 ```
 
+## How to extract GGUF system template from models
+
+```bash
+python3 -c 'from gguf import GGUFReader; reader = GGUFReader("Qwen3.5-9B-Q4_K_M.gguf"); print(reader.get_field("tokenizer.chat_template").parts[-1].tobytes().decode())'
+```
+
 # TODO
 
 - [x] make sure the script is cleaning all the *.wav files when finish
 
 - [ ] create a "proxy" to evaluate if enable or not Thinking process.
     - if so, tell to the user "I'm thinking, be patient..."
-
-- [ ] use `--reasoning-format none` when `llama-server` spin up instead of stripping `<thinking>` annotation    
-
-- [ ] the ninja template is not working properly with /no-thinking
