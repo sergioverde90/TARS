@@ -36,11 +36,18 @@ COMPUTE_TYPE     = "int8"     # Optimized for CPU/Pi
 LLAMA_CHAT_URL   = "http://localhost:8081/v1/chat/completions"  # tars-backend Java; swap to :8080 to bypass
 LLAMA_TIMEOUT    = 60
 LLAMA_SYSTEM     = """
-    Your name is TARS. You are aboard on a spacecraft. 
-    Your mission is to help as much as you can to the crew. 
-    2 sentences max. Keep it short and to the point, no pleasantries. 
-    If someone greets you or says your name, ALWAYS respond normally.
-    When the user ends the conversation (goodbye, see you, shut down, thanks, etc.), you MUST end your reply with the exact tag </closing>.
+    * Your name is TARS. You are aboard on a spacecraft. 
+    * Your mission is to help as much as you can to the crew.
+
+    ** Conversation **
+    * 2 sentences max. 
+    * Keep it short and to the point
+    * no pleasantries. 
+
+    ** State machine **
+    1. If someone greets you or says your name, ALWAYS respond normally.
+    2. At the end of every prompt (except greetings) ALWAYS as if you can help with anything else
+    3. If the user gives a negative answer, you MUST end your reply with the exact tag </closing>.
 """
 
 # Activation: any of these words wake TARS up
@@ -120,20 +127,22 @@ def render_wav(text):
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             robot_wav_path = f.name
 
+        # SPEED: Kept at 0.75 for fast, fluent delivery.
         subprocess.run(
             [PIPER_BIN, "-m", "piper", "--model", PIPER_MODEL,
-             "--length-scale", "0.60", "--output_file", raw_wav_path],
+             "--length-scale", "0.75", "--output_file", raw_wav_path],
             input=clean, text=True, capture_output=True
         )
+        
+        # ROBOTIC TWEAK: Re-introducing the metallic resonance and "grit"
         subprocess.run(
             [SOX_BIN, raw_wav_path, robot_wav_path,
              "norm", "-3", 
-             "bass", "-5", 
-             "treble", "+3",   # the higher value the more metallic it sounds
-             "overdrive", "3", # the higher value the more metallic it sounds    
-             "pitch", "-125",
-             "echo", "0.6", "0.5", "15", "0.2",
-             "flanger", "0.5", "0.8", "0", "0.7", "0.5",
+             "pitch", "-100",  # Dropped back down for a more mechanical bass
+             "treble", "+4",   # Sharpens the high end to make it sound "electronic"
+             "overdrive", "3", # Adds that subtle distortion found in ship comms
+             "echo", "0.8", "0.3", "5", "0.2", # Very tight, metallic echo
+             "flanger", "0.4", "0.7", "0", "0.6", "0.5", # Increased "ringing" for robotic tone
              "rate", "22050"],
             capture_output=True
         )
@@ -146,7 +155,6 @@ def render_wav(text):
     finally:
         if raw_wav_path:
             Path(raw_wav_path).unlink(missing_ok=True)
-
 
 def play_wav(path):
     """Play a pre-rendered wav and delete it afterwards."""

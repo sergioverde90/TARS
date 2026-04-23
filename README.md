@@ -19,11 +19,10 @@ sox --version
 * https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
 * https://huggingface.co/unsloth/Qwen3.5-9B-GGUF
 
-## SPIN UP LLAMA SERVER - ALL PARAMETERS INDICATED
+## Spin up llama-server
 
 ```bash
-llama-server \
-  -m /Users/sergio/projects/ai/models/Qwen3.5-9B-Q4_K_M.gguf \
+llama-server -m /Users/sergio/projects/ai/models/Qwen3.5-9B-Q4_K_M.gguf \
   -c 100000 \
   --jinja \
   --threads 10 \
@@ -31,18 +30,13 @@ llama-server \
   --min-p 0.06 \
   --presence-penalty 1.2 \
   --repeat-penalty 1.05 \
-  --reasoning-budget-message "[Reasoning budget exhausted. Getting the final answer...]"
-```
-
-## SPIN UP LLAMA SERVER - MINIMAL PARAMETERS + COMPLETION API
-
-```bash
-llama-server \
-  -m /Users/sergio/projects/ai/models/Qwen3.5-9B-Q4_K_M.gguf \
-  -c 100000 \
-  --jinja \
-  --threads 10 \
-  --reasoning-budget-message "[Reasoning budget exhausted. Getting the final answer...]"
+  --reasoning-budget 512 \
+  --reasoning-budget-message "[Reasoning budget exhausted. Getting the final answer...]" \
+  --kv-unified \
+  --cache-type-k q8_0 --cache-type-v q8_0 \
+  --flash-attn on --fit on \
+  --batch-size 4096 --ubatch-size 1024
+  --chat-template-kwargs '{"enable_thinking": false}' // or omit parameter to enable thinking
 ```
 
 ```bash
