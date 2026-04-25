@@ -3,10 +3,7 @@ package com.tars.config;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.tars.tools.DistanceTool;
-import com.tars.tools.SearchTool;
-import com.tars.tools.TimeTool;
-import com.tars.tools.WebsiteScrappingTool;
+import com.tars.tools.*;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.agent.tool.ToolSpecifications;
 import org.springframework.context.annotation.Bean;
@@ -31,13 +28,15 @@ public class TarsConfiguration {
             TimeTool timeTool,
             DistanceTool distanceTool,
             SearchTool searchTool,
-            WebsiteScrappingTool websiteScrappingTool) {
+            WebsiteScrappingTool websiteScrappingTool,
+            YahooFinanceTool yahooFinanceTool) {
 
         ArrayList<ToolSpecification> toolSpecs = new ArrayList<>();
         toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(timeTool));
         toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(distanceTool));
         toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(searchTool));
         toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(websiteScrappingTool));
+        toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(yahooFinanceTool));
 
         //log.info("Registered tool specs: {}", toolSpecs.stream().map(ToolSpecification::name).toList());
 
@@ -49,9 +48,26 @@ public class TarsConfiguration {
             ObjectMapper mapper, TimeTool timeTool,
             DistanceTool distanceTool,
             SearchTool searchTool,
-            WebsiteScrappingTool websiteScrappingTool) {
+            WebsiteScrappingTool websiteScrappingTool,
+            YahooFinanceTool yahooFinanceTool){
         Map<String, Function<String, String>> toolHandlers = new HashMap<>();
         toolHandlers.put("currentTime", args -> timeTool.currentTime());
+        toolHandlers.put("lookupTicker", args -> {
+            try {
+                JsonNode node = mapper.readTree(args);
+                return yahooFinanceTool.lookupTicker(node.path("companyName").asText());
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        toolHandlers.put("getStockPrice", args -> {
+            try {
+                JsonNode node = mapper.readTree(args);
+                return yahooFinanceTool.getStockPrice(node.path("ticker").asText());
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
+        });
         toolHandlers.put("scrape", args -> {
             try {
                 JsonNode node = mapper.readTree(args);
