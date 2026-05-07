@@ -6,10 +6,10 @@ import com.tars.api.dto.ChatCompletionRequest;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.*;
-import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
+import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
@@ -29,17 +29,14 @@ public class StreamChatCompletionService {
     private static final int MAX_TOOL_ITERATIONS = 5;
     private static final long SSE_TIMEOUT = 300_000L;
 
-    private final StreamingChatModel streamingModel;
     private final List<ToolSpecification> toolSpecs;
     private final Map<String, Function<String, String>> toolHandlers;
     private final ObjectMapper mapper = new ObjectMapper();
 
     public StreamChatCompletionService(
-        StreamingChatModel streamingModel,
         List<ToolSpecification> toolSpecifications,
         Map<String, Function<String, String>> toolHandlers
     ) {
-        this.streamingModel = streamingModel;
         this.toolSpecs = toolSpecifications;
         this.toolHandlers = toolHandlers;
     }
@@ -65,6 +62,24 @@ public class StreamChatCompletionService {
             .messages(messages)
             .toolSpecifications(toolSpecs)
             .build();
+
+        OpenAiStreamingChatModel streamingModel = OpenAiStreamingChatModel.builder()
+                .baseUrl("http://localhost:8080/v1")
+                .apiKey("not-needed")
+                .modelName("unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit")
+                .temperature(0.8)
+                .maxTokens(8192)
+                .customParameters(Map.of(
+                        "min_p",                  0.06,
+                        "presence_penalty",       1.2,
+                        "repeat_penalty",         1.05,
+                        "thinking_budget_tokens", 512,
+                        "chat_template_kwargs",   Map.of(
+                                "enable_thinking",    true,
+                                "preserve_thinking",  false
+                        )
+                ))
+                .build();
 
         streamingModel.chat(request, new StreamingChatResponseHandler() {
 
@@ -140,8 +155,8 @@ public class StreamChatCompletionService {
         return messages.stream()
             .map(m -> switch (m.role()) {
                 case "system"    -> (ChatMessage) SystemMessage.from(m.content() + TOOL_INSTRUCTION);
-                case "assistant" -> AiMessage.from(m.content());
-                default          -> UserMessage.from(m.content());
+                case "assistant" -> AiMessage.from((String) m.content());
+                default          -> UserMessage.from((String) m.content());
             })
             .toList();
     }

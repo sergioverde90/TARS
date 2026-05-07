@@ -89,8 +89,8 @@ public class ChatCompletionService {
         return messages.stream()
             .map(m -> switch (m.role()) {
                 case "system"    -> (ChatMessage) SystemMessage.from(m.content() + TOOL_INSTRUCTION);
-                case "assistant" -> AiMessage.from(m.content());
-                default          -> UserMessage.from(m.content());
+                case "assistant" -> AiMessage.from((String) m.content());
+                default          -> UserMessage.from((String) m.content());
             })
             .toList();
     }

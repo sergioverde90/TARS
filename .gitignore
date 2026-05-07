@@ -1,2 +1,6 @@
 .DS_Store
 .qwen
+.opencode
+cache/
+logs/
+mlx_trace.log

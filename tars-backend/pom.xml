@@ -30,14 +30,14 @@
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-open-ai-spring-boot-starter</artifactId>
-            <version>1.0.0-beta4</version>
+            <version>1.12.2-beta22</version>
         </dependency>
 
         <!-- langchain4j core Spring Boot starter (AiServices, ChatMemory, etc.) -->
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-spring-boot-starter</artifactId>
-            <version>1.0.0-beta4</version>
+            <version>1.12.2-beta22</version>
         </dependency>
 
         <dependency>
