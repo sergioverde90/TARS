@@ -15,7 +15,7 @@ langchain4j:
       base-url: http://localhost:8080/v1
       api-key: not-needed
       model-name: local
-      timeout: 120s
+      timeout: 500s
       log-requests: false
       log-responses: false
     # Streaming model (used for final response to Python client)
@@ -23,7 +23,7 @@ langchain4j:
       base-url: http://localhost:8080/v1
       api-key: not-needed
       model-name: local
-      timeout: 120s
+      timeout: 500s
       log-requests: false
       log-responses: false
 

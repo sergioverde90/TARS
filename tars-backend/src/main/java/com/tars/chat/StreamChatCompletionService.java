@@ -27,7 +27,7 @@ import java.util.function.Function;
 public class StreamChatCompletionService {
 
     private static final Logger log = LoggerFactory.getLogger(StreamChatCompletionService.class);
-    private static final int MAX_TOOL_ITERATIONS = 5;
+    private static final int MAX_TOOL_ITERATIONS = 12;
     private static final long SSE_TIMEOUT = 300_000L;
 
     private final List<ToolSpecification> toolSpecs;
@@ -69,14 +69,14 @@ public class StreamChatCompletionService {
                 .apiKey("not-needed")
                 .modelName("unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit")
                 .temperature(0.8)
-                .maxTokens(16384)
+                .maxTokens(131072)
                 .timeout(Duration.ofMinutes(5))
                 .customParameters(Map.of(
                         "min_p",                  0.06,
                         "presence_penalty",       1.2,
                         "repeat_penalty",         1.05,
                         "chat_template_kwargs",   Map.of(
-                                "enable_thinking",    true
+                                "enable_thinking",    false
                         )
                 ))
                 .build();
