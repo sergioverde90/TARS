@@ -31,8 +31,8 @@ public class WebsiteScrappingTool {
             String content = response.body();
 
             // Trim for LLM context
-            if (content.length() > 8000) {
-                content = content.substring(0, 8000) + "...";
+            if (content.length() > 3000) {
+                content = content.substring(0, 3000) + "...";
             }
 
             return content;

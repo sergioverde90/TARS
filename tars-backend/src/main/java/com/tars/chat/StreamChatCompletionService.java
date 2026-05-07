@@ -17,6 +17,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -68,15 +69,14 @@ public class StreamChatCompletionService {
                 .apiKey("not-needed")
                 .modelName("unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit")
                 .temperature(0.8)
-                .maxTokens(8192)
+                .maxTokens(16384)
+                .timeout(Duration.ofMinutes(5))
                 .customParameters(Map.of(
                         "min_p",                  0.06,
                         "presence_penalty",       1.2,
                         "repeat_penalty",         1.05,
-                        "thinking_budget_tokens", 512,
                         "chat_template_kwargs",   Map.of(
-                                "enable_thinking",    true,
-                                "preserve_thinking",  false
+                                "enable_thinking",    true
                         )
                 ))
                 .build();

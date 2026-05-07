@@ -69,7 +69,10 @@ TARS_NAME_RE = re.compile(r'\btars\b', re.IGNORECASE)
 SAMPLE_RATE      = 16000
 CHANNELS         = 1
 CHUNK_SIZE       = 512       # Required by Silero VAD
-SILENCE_LIMIT_MS = 800       # End recording after 0.8s of silence
+SILENCE_LIMIT_MS = 2000      # End recording after 2s of silence (natural speech pauses 300-800ms)
+VAD_PROB_THRESHOLD = 0.60    # Silero VAD probability threshold (balanced noise rejection)
+VAD_SPEECH_PAD_MS  = 200     # Pad speech boundaries to preserve beginning/end of utterances
+NOISE_GATE_DB      = -30     # Noise gate threshold in dB relative to max amplitude
 
 # TTS Settings
 PIPER_MODEL      = "/Users/sergio/projects/ai/piper-voices/en/en_US/bryce/medium/en_US-bryce-medium.onnx"
@@ -97,6 +100,17 @@ whisper_model = WhisperModel(
 # Silero VAD is neural-net based: ignores fans, keyboards, and hums
 vad_model = load_silero_vad()
 
+# Common noise hallucinations to filter out before sending to LLM
+NOISE_HALLUCINATIONS = re.compile(
+    r'^\s*'
+    r'(?:'
+    r'\[.*?\]|'           # [BLANK_AUDIO], [NOISE], etc.
+    r'\(.*?\)|'           # (silence), (noise), (inaudible), etc.
+    r'^\s*[-*#]+\.?\s*$'  # Gibberish like "---", "***", "#", etc.
+    r')\s*$',
+    re.IGNORECASE | re.MULTILINE
+)
+
 # ─────────────────────────────────────────────
 # LOGIC COMPONENTS (History, TTS, etc.)
 # ─────────────────────────────────────────────
@@ -105,7 +119,7 @@ vad_model = load_silero_vad()
 is_speaking = threading.Event()
 
 class ConversationHistory:
-    def __init__(self, max_turns=6):
+    def __init__(self, max_turns=4):
         self.turns = []
         self.max_turns = max_turns
         self.active = False  # Starts silent; wakes on TARS name
@@ -126,9 +140,53 @@ class ConversationHistory:
         return messages
 
 
+def apply_noise_gate(audio, threshold_db=NOISE_GATE_DB):
+    """Apply amplitude-based noise gate to audio buffer.
+    
+    Zeroes out samples below the threshold (relative to max amplitude).
+    Removes low-level background noise before transcription.
+    """
+    if len(audio) == 0:
+        return audio
+    
+    max_amp = np.max(np.abs(audio))
+    if max_amp < 1e-10:
+        return np.zeros_like(audio)
+    
+    threshold = max_amp * (10 ** (threshold_db / 20.0))
+    gated = audio.copy()
+    gated[np.abs(gated) < threshold] = 0.0
+    return gated
+
+
+def filter_noise_hallucinations(text):
+    """Filter out common noise artifacts and hallucinations from transcription.
+    
+    Removes text that looks like noise artifacts rather than actual speech.
+    """
+    if not text:
+        return text
+    
+    # Remove bracketed/parenthesized noise markers
+    cleaned = re.sub(r'\[.*?\]', '', text)
+    cleaned = re.sub(r'\(.*?\)', '', cleaned)
+    cleaned = cleaned.strip()
+    
+    # Check if remaining text is just noise-like patterns
+    if NOISE_HALLUCINATIONS.match(cleaned):
+        return ""
+    
+    # Filter out very short fragments that are likely noise artifacts
+    if len(cleaned) < 2:
+        return ""
+    
+    return cleaned
+
+
 def render_wav(text):
     """Render text through Piper + SoX into a temp wav. Returns path or None."""
     clean = re.sub(r"\[.*?\]", "", text).strip()
+    clean = filter_noise_hallucinations(clean)
     if not clean:
         return None
     raw_wav_path = None
@@ -139,10 +197,10 @@ def render_wav(text):
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             robot_wav_path = f.name
 
-        # SPEED: Kept at 0.75 for fast, fluent delivery.
+        # SPEED: Increased to 1.15 for faster delivery
         subprocess.run(
             [PIPER_BIN, "-m", "piper", "--model", PIPER_MODEL,
-             "--length-scale", "0.75", "--output_file", raw_wav_path],
+             "--length-scale", "0.87", "--output_file", raw_wav_path],
             input=clean, text=True, capture_output=True
         )
         
@@ -431,14 +489,26 @@ def pipeline_worker(audio_queue, history, stop_event, stream=True):
 
         log.info("Transcribing...")
 
+        # Apply noise gate to remove low-level background noise
+        audio_data = apply_noise_gate(audio_data, threshold_db=NOISE_GATE_DB)
+
+        # Whisper VAD parameters for aggressive noise rejection
+        vad_params = {
+            "threshold": 0.5,
+            "min_silence_duration_ms": 1500,
+            "max_speech_duration_s": 10.0,
+        }
+
         segments, _ = whisper_model.transcribe(
             audio_data, 
             beam_size=5, 
-            vad_filter=False, 
+            vad_filter=True, 
+            vad_parameters=vad_params,
             language="en",
             initial_prompt="TARS is an AI robot assistant aboard a spacecraft."
         )
         text = " ".join([s.text for s in segments]).strip()
+        text = filter_noise_hallucinations(text)
 
         if not text or len(text) < 2:
             continue
@@ -467,7 +537,9 @@ class VoiceCapture:
         self.stop_event = threading.Event()
         # Silero Iterator handles the "is speaking" state machine for us
         self.vad_iterator = VADIterator(vad_model, sampling_rate=SAMPLE_RATE,
-                                        min_silence_duration_ms=SILENCE_LIMIT_MS)
+                                         min_silence_duration_ms=SILENCE_LIMIT_MS,
+                                         threshold=VAD_PROB_THRESHOLD,
+                                         speech_pad_ms=VAD_SPEECH_PAD_MS)
 
     def run(self):
         p = pyaudio.PyAudio()
