@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tars.tools.*;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.agent.tool.ToolSpecifications;
+import dev.langchain4j.http.client.HttpClientBuilder;
+import dev.langchain4j.http.client.spring.restclient.SpringRestClientBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -97,6 +99,11 @@ public class TarsConfiguration {
         });
 
         return toolHandlers;
+    }
+
+    @Bean
+    public HttpClientBuilder httpClientBuilder() {
+        return new SpringRestClientBuilder();
     }
 
 }

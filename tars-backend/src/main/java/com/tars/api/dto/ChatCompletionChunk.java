@@ -22,11 +22,15 @@ public record ChatCompletionChunk(
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Delta(
         String content,
-        @JsonProperty("reasoning_content") String reasoningContent
+        @JsonProperty("reasoning") String reasoning
     ) {}
 
     public static ChatCompletionChunk contentDelta(String content) {
         return chunk(new Delta(content, null), null);
+    }
+
+    public static ChatCompletionChunk reasoningDelta(String reasoning) {
+        return chunk(new Delta(null, reasoning), null);
     }
 
     public static ChatCompletionChunk finish() {
