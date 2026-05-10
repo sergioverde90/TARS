@@ -26,24 +26,10 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- langchain4j OpenAI integration — auto-configures StreamingChatModel + ChatModel beans -->
-        <dependency>
-            <groupId>dev.langchain4j</groupId>
-            <artifactId>langchain4j-open-ai-spring-boot-starter</artifactId>
-            <version>1.12.2-beta22</version>
-        </dependency>
-
-        <!-- langchain4j core Spring Boot starter (AiServices, ChatMemory, etc.) -->
-        <dependency>
-            <groupId>dev.langchain4j</groupId>
-            <artifactId>langchain4j-spring-boot-starter</artifactId>
-            <version>1.12.2-beta22</version>
-        </dependency>
-
         <dependency>
             <groupId>org.jsoup</groupId>
             <artifactId>jsoup</artifactId>
-            <version>1.22.1</version> <!-- Check for latest version -->
+            <version>1.22.1</version>
         </dependency>
 
         <dependency>

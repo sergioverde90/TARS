@@ -3,11 +3,6 @@ package com.tars.chat;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tars.api.dto.ChatCompletionRequest;
-import dev.langchain4j.agent.tool.ToolExecutionRequest;
-import dev.langchain4j.agent.tool.ToolSpecification;
-import dev.langchain4j.data.message.*;
-import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
-import dev.langchain4j.model.chat.request.json.JsonSchemaElement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
@@ -49,15 +44,15 @@ public class StreamChatCompletionService {
     private static final long SSE_TIMEOUT = 300_000L;
     private static final Pattern REASONING_KEY = Pattern.compile("\"reasoning\"\\s*:");
 
-    private final List<ToolSpecification> toolSpecs;
+    private final List<ToolMetadata> toolMetadata;
     private final Map<String, Function<String, String>> toolHandlers;
     private final ObjectMapper mapper = new ObjectMapper();
 
     public StreamChatCompletionService(
-        List<ToolSpecification> toolSpecifications,
+        List<ToolMetadata> toolMetadata,
         Map<String, Function<String, String>> toolHandlers
     ) {
-        this.toolSpecs = toolSpecifications;
+        this.toolMetadata = toolMetadata;
         this.toolHandlers = toolHandlers;
     }
 
@@ -112,24 +107,23 @@ public class StreamChatCompletionService {
                 }
 
                 // After streaming, check if we need to execute tool calls
-                List<ToolExecutionRequest> toolCalls = accumulator.getToolCalls();
-
-                System.out.println("toolCalls = " + toolCalls);
+                List<ToolCall> toolCalls = accumulator.getToolCalls();
 
                 if (!toolCalls.isEmpty()) {
                     log.info("Accumulated {} tool calls, executing...", toolCalls.size());
 
                     // Append the assistant message with tool calls to the conversation
-                    AiMessage assistantMessage = AiMessage.from(toolCalls);
+                    AssistantMessage assistantMessage = AssistantMessage.from(toolCalls);
                     messages.add(assistantMessage);
 
                     // Execute each tool call and append results
-                    for (ToolExecutionRequest req : toolCalls) {
-                        String result = executeToolCall(req);
+                    for (ToolCall call : toolCalls) {
+                        String result = executeToolCall(call);
                         System.out.println("result = " + result);
-                        ToolExecutionResultMessage toolResult = ToolExecutionResultMessage.from(req, result);
+                        ToolResultMessage toolResult = ToolResultMessage.from(call, result);
+                        System.out.println("toolResult = " + toolResult);
                         messages.add(toolResult);
-                        log.info("Tool '{}' executed, result length: {}", req.name(), result.length());
+                        log.info("Tool '{}' executed, result length: {}", call.name(), result.length());
                     }
 
                     // Recurse with the updated conversation
@@ -181,7 +175,7 @@ public class StreamChatCompletionService {
         try {
             JsonNode root = mapper.readTree(data);
             JsonNode choices = root.path("choices");
-            if (choices.isArray() && choices.size() > 0) {
+            if (choices.isArray() && !choices.isEmpty()) {
                 JsonNode choice = choices.get(0);
                 JsonNode finishReason = choice.path("finish_reason");
                 JsonNode delta = choice.path("delta");
@@ -189,13 +183,13 @@ public class StreamChatCompletionService {
 
                 // Check for tool_calls in delta (streaming chunks)
                 JsonNode deltaToolCalls = delta.path("tool_calls");
-                if (deltaToolCalls.isArray() && deltaToolCalls.size() > 0) {
+                if (deltaToolCalls.isArray() && !deltaToolCalls.isEmpty()) {
                     accumulator.processDeltaToolCalls(deltaToolCalls);
                 }
 
                 // Check for tool_calls in message (final non-streaming chunk)
                 JsonNode messageToolCalls = message.path("tool_calls");
-                if (messageToolCalls.isArray() && messageToolCalls.size() > 0) {
+                if (messageToolCalls.isArray() && !messageToolCalls.isEmpty()) {
                     accumulator.processMessageToolCalls(messageToolCalls);
                 }
 
@@ -206,103 +200,74 @@ public class StreamChatCompletionService {
             }
         } catch (Exception e) {
             // Not JSON or parsing error, ignore for tool call processing
-            log.debug("Non-JSON SSE line or parse error", e);
+            log.error("Non-JSON SSE line or parse error", e);
         }
 
         // Rewrite "reasoning_content" -> "reasoning" to match what the client expects
         return REASONING_KEY.matcher(data).replaceAll("\"reasoning\":");
     }
 
-    private static final Map<String, String> SCHEMA_TYPE_MAP = Map.of(
-            "JsonStringSchema",  "string",
-            "JsonIntegerSchema", "integer",
-            "JsonNumberSchema",  "number",
-            "JsonBooleanSchema", "boolean",
-            "JsonArraySchema",   "array"
-    );
-
-    private Map<String, Object> convertSchemaElements(Map<String, ? extends Object> elements) {
-        Map<String, Object> result = new HashMap<>();
-        for (Map.Entry<String, ? extends Object> entry : elements.entrySet()) {
-            result.put(entry.getKey(), convertElement(entry.getValue()));
-        }
-        return result;
-    }
-
-    private Map<String, Object> convertElement(Object elem) {
-        if (elem instanceof JsonObjectSchema schema) {
-            Map<String, Object> obj = new HashMap<>();
-            obj.put("type", "object");
-            obj.put("properties", convertSchemaElements(schema.properties()));
-            obj.put("required", schema.required());
-            if (schema.description() != null && !schema.description().isEmpty()) {
-                obj.put("description", schema.description());
-            }
-            return obj;
-        }
-
-        // All other schema types (string, integer, number, boolean, array...)
-        Map<String, Object> typeMap = new HashMap<>();
-        typeMap.put("type", SCHEMA_TYPE_MAP.getOrDefault(elem.getClass().getSimpleName(), "string"));
-        if (elem instanceof JsonSchemaElement jsonElem
-                && jsonElem.description() != null
-                && !jsonElem.description().isEmpty()) {
-            typeMap.put("description", jsonElem.description());
-        }
-        return typeMap;
-    }
-
     private Map<String, Object> buildRequestBody(List<ChatMessage> messages) {
-        List<Map<String, String>> apiMessages = messages.stream()
+        List<Map<String, Object>> apiMessages = messages.stream()
             .map(m -> {
-                String role;
-                String content;
-                if (m instanceof SystemMessage sys) {
-                    role = "system";
-                    content = sys.text();
-                } else if (m instanceof UserMessage user) {
-                    role = "user";
-                    content = user.singleText();
-                } else if (m instanceof AiMessage ai) {
-                    role = "assistant";
-                    content = ai.text() != null ? ai.text() : "";
-                } else if (m instanceof ToolExecutionResultMessage tool) {
-                    role = "tool";
-                    content = tool.text();
-                } else {
-                    role = "user";
-                    content = String.valueOf(m);
+                switch (m) {
+                    case SystemMessage sys -> {
+                        return Map.<String, Object>of("role", "system", "content", sys.text());
+                    }
+                    case UserMessage user -> {
+                        return Map.<String, Object>of("role", "user", "content", user.text());
+                    }
+                    case AssistantMessage ai -> {
+                        Map<String, Object> msg = new HashMap<>();
+                        msg.put("role", "assistant");
+                        msg.put("content", ai.text() != null ? ai.text() : "");
+                        // ✅ Include tool_calls so the model remembers it made them
+                        if (ai.toolCalls() != null && !ai.toolCalls().isEmpty()) {
+                            List<Map<String, Object>> tcList = ai.toolCalls().stream()
+                                .map(tc -> {
+                                    Map<String, Object> tcMap = new HashMap<>();
+                                    tcMap.put("id", tc.id());
+                                    tcMap.put("type", "function");
+                                    tcMap.put("function", Map.of(
+                                            "name", tc.name(),
+                                            "arguments", tc.arguments()
+                                    ));
+                                    return tcMap;
+                                }).toList();
+                            msg.put("tool_calls", tcList);
+                        }
+                        return msg;
+                    }
+                    case ToolResultMessage tool -> {
+                        // ✅ tool_call_id must match the id in the assistant message above
+                        return Map.<String, Object>of(
+                            "role", "tool",
+                            "tool_call_id", tool.toolCallId(),
+                            "content", tool.result()
+                        );
+                    }
+                    default -> {
+                        return Map.<String, Object>of("role", "user", "content", String.valueOf(m));
+                    }
                 }
-                return Map.of("role", role, "content", content);
             })
             .toList();
 
-        // Build tools array from ToolSpecifications
-        List<Map<String, Object>> tools = toolSpecs.stream()
+        // Build tools array from ToolMetadata
+        List<Map<String, Object>> tools = toolMetadata.stream()
             .map(spec -> {
                 Map<String, Object> tool = new HashMap<>();
                 tool.put("type", "function");
                 Map<String, Object> function = new HashMap<>();
                 function.put("name", spec.name());
                 function.put("description", spec.description());
-                // Build parameters from JsonObjectSchema
-                JsonObjectSchema schema = spec.parameters();
-                if (schema != null) {
-                    Map<String, Object> params = new HashMap<>();
-                    params.put("type", "object");
-                    params.put("properties", convertSchemaElements(schema.properties()));
-                    params.put("required", schema.required());
-                    function.put("parameters", params);
-                }
+                function.put("parameters", spec.parameters());
                 tool.put("function", function);
                 return tool;
             })
             .toList();
 
-        System.out.println("tools = " + tools);
-
         Map<String, Object> body = new HashMap<>();
-        body.put("model", "unsloth/Qwen3.6-35B-A3B-UD-MLX-3bit");
         body.put("messages", apiMessages);
         body.put("tools", tools);
         body.put("tool_choice", "auto");
@@ -316,16 +281,16 @@ public class StreamChatCompletionService {
         return body;
     }
 
-    private String executeToolCall(ToolExecutionRequest req) {
-        Function<String, String> handler = toolHandlers.get(req.name());
+    private String executeToolCall(ToolCall call) {
+        Function<String, String> handler = toolHandlers.get(call.name());
         if (handler == null) {
-            log.warn("Unknown tool: {}", req.name());
-            return "Unknown tool: " + req.name();
+            log.warn("Unknown tool: {}", call.name());
+            return "Unknown tool: " + call.name();
         }
         try {
-            return handler.apply(req.arguments());
+            return handler.apply(call.arguments());
         } catch (Exception e) {
-            log.error("Tool '{}' failed", req.name(), e);
+            log.error("Tool '{}' failed", call.name(), e);
             return "Tool error: " + e.getMessage();
         }
     }
@@ -333,8 +298,8 @@ public class StreamChatCompletionService {
     private List<ChatMessage> convertMessages(List<ChatCompletionRequest.Message> messages) {
         return new ArrayList<>(messages.stream()
             .map(m -> switch (m.role()) {
-                case "system"    -> (ChatMessage) SystemMessage.from(m.content() + TOOL_INSTRUCTION);
-                case "assistant" -> AiMessage.from((String) m.content());
+                case "system"    -> SystemMessage.from(m.content() + TOOL_INSTRUCTION);
+                case "assistant" -> AssistantMessage.from((String) m.content());
                 default          -> UserMessage.from((String) m.content());
             })
             .toList());
@@ -359,94 +324,4 @@ public class StreamChatCompletionService {
         }
     }
 
-    /**
-     * Accumulates tool call data from SSE chunks.
-     * Handles two formats:
-     * 1. Streaming delta format: delta.tool_calls[{index, id, function: {name, arguments}}]
-     * 2. Message format (mlx-openai-server): message.tool_calls[{id, type, function: {name, arguments}}]
-     */
-    private static class ToolCallAccumulator {
-        private final Map<String, ToolCallBuilder> builders = new HashMap<>();
-        private final List<ToolExecutionRequest> toolCalls = new ArrayList<>();
-        private boolean complete = false;
-
-        private static class ToolCallBuilder {
-            String id;
-            String name;
-            StringBuilder arguments = new StringBuilder();
-
-            void addFunctionCall(String name, String args) {
-                if (name != null) {
-                    this.name = this.name != null ? this.name + name : name;
-                }
-                if (args != null) {
-                    this.arguments.append(args);
-                }
-            }
-        }
-
-        // Handle streaming delta format: delta.tool_calls with index field
-        public void processDeltaToolCalls(JsonNode toolCallsNode) {
-            for (JsonNode tc : toolCallsNode) {
-                JsonNode indexNode = tc.path("index");
-                String key = indexNode.isInt() ? String.valueOf(indexNode.asInt()) : "0";
-
-                ToolCallBuilder builder = builders.computeIfAbsent(key, k -> new ToolCallBuilder());
-
-                JsonNode idNode = tc.path("id");
-                if (idNode.isTextual()) {
-                    builder.id = idNode.asText();
-                }
-
-                JsonNode functionNode = tc.path("function");
-                JsonNode nameNode = functionNode.path("name");
-                JsonNode argsNode = functionNode.path("arguments");
-
-                String name = nameNode.isTextual() ? nameNode.asText() : null;
-                String args = argsNode.isTextual() ? argsNode.asText() : null;
-
-                builder.addFunctionCall(name, args);
-            }
-        }
-
-        // Handle message format: message.tool_calls with id, type, function structure
-        public void processMessageToolCalls(JsonNode toolCallsNode) {
-            for (JsonNode tc : toolCallsNode) {
-                String key = tc.path("id").isTextual() ? tc.path("id").asText() : "0";
-
-                ToolCallBuilder builder = builders.computeIfAbsent(key, k -> new ToolCallBuilder());
-
-                JsonNode idNode = tc.path("id");
-                if (idNode.isTextual()) {
-                    builder.id = idNode.asText();
-                }
-
-                JsonNode functionNode = tc.path("function");
-                JsonNode nameNode = functionNode.path("name");
-                JsonNode argsNode = functionNode.path("arguments");
-
-                String name = nameNode.isTextual() ? nameNode.asText() : null;
-                String args = argsNode.isTextual() ? argsNode.asText() : null;
-
-                builder.addFunctionCall(name, args);
-            }
-        }
-
-        public void markComplete() {
-            complete = true;
-            for (Map.Entry<String, ToolCallBuilder> entry : builders.entrySet()) {
-                ToolCallBuilder builder = entry.getValue();
-                ToolExecutionRequest req = ToolExecutionRequest.builder()
-                    .id(builder.id)
-                    .name(builder.name)
-                    .arguments(builder.arguments.toString())
-                    .build();
-                toolCalls.add(req);
-            }
-        }
-
-        public List<ToolExecutionRequest> getToolCalls() {
-            return toolCalls;
-        }
-    }
 }

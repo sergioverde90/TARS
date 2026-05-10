@@ -1,7 +1,5 @@
 package com.tars.tools;
 
-import dev.langchain4j.agent.tool.P;
-import dev.langchain4j.agent.tool.Tool;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -13,8 +11,7 @@ import java.net.URL;
 @Component
 public class WebsiteScrappingTool {
 
-    @Tool("Fetches the content of a web page at the given URL and returns it as clean markdown text, including the page title, main content, and any relevant structured information. Use this when you need to read the actual content of a specific URL.")
-    public String scrape(@P("the full URL to fetch, including https://") String url) {
+    public String scrape(String url) {
 
         if (url == null || url.isEmpty()) {
             return "Error: URL is null or empty.";

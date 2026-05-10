@@ -3,8 +3,6 @@ package com.tars.tools;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tars.config.TarsProperties;
-import dev.langchain4j.agent.tool.P;
-import dev.langchain4j.agent.tool.Tool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -33,11 +31,7 @@ public class DistanceTool {
             .build();
     }
 
-    @Tool("Calculates the driving distance and estimated travel time between two places by car")
-    public String drivingDistance(
-        @P("origin place name or address") String from,
-        @P("destination place name or address") String to
-    ) {
+    public String drivingDistance(String from, String to) {
         try {
             double[] originCoords = geocode(from);
             double[] destCoords = geocode(to);

@@ -3,8 +3,6 @@ package com.tars.tools;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tars.config.TarsProperties;
-import dev.langchain4j.agent.tool.P;
-import dev.langchain4j.agent.tool.Tool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
@@ -29,8 +27,7 @@ public class SearchTool {
             .build();
     }
 
-    @Tool("Searches the web for current information on any topic. Use when the user asks about recent news, facts, or anything that may have changed.")
-    public String webSearch(@P("search query") String query) {
+    public String webSearch(String query) {
         try {
             Map<String, Object> body = Map.of(
                 "query", query,

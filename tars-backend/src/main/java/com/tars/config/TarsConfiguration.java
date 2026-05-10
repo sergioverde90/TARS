@@ -3,15 +3,11 @@ package com.tars.config;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tars.chat.ToolMetadata;
 import com.tars.tools.*;
-import dev.langchain4j.agent.tool.ToolSpecification;
-import dev.langchain4j.agent.tool.ToolSpecifications;
-import dev.langchain4j.http.client.HttpClientBuilder;
-import dev.langchain4j.http.client.spring.restclient.SpringRestClientBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,26 +19,6 @@ public class TarsConfiguration {
     @Bean
     public ObjectMapper objectMapper() {
         return new ObjectMapper();
-    }
-
-    @Bean
-    public List<ToolSpecification> toolSpecifications(
-            TimeTool timeTool,
-            DistanceTool distanceTool,
-            SearchTool searchTool,
-            WebsiteScrappingTool websiteScrappingTool,
-            YahooFinanceTool yahooFinanceTool) {
-
-        ArrayList<ToolSpecification> toolSpecs = new ArrayList<>();
-        toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(timeTool));
-        toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(distanceTool));
-        toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(searchTool));
-        toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(websiteScrappingTool));
-        toolSpecs.addAll(ToolSpecifications.toolSpecificationsFrom(yahooFinanceTool));
-
-        //log.info("Registered tool specs: {}", toolSpecs.stream().map(ToolSpecification::name).toList());
-
-        return toolSpecs;
     }
 
     @Bean
@@ -102,8 +78,76 @@ public class TarsConfiguration {
     }
 
     @Bean
-    public HttpClientBuilder httpClientBuilder() {
-        return new SpringRestClientBuilder();
+    public List<ToolMetadata> toolMetadata() {
+        return List.of(
+            // currentTime — no parameters
+            new ToolMetadata(
+                "currentTime",
+                "Returns the current date and time in the user's local timezone (Europe/Madrid, Spain)",
+                Map.of("type", "object", "properties", Map.of(), "required", List.of())
+            ),
+            // lookupTicker
+            new ToolMetadata(
+                "lookupTicker",
+                "Look up the stock ticker symbol for a company name (e.g., 'Apple' -> 'AAPL')",
+                Map.of(
+                    "type", "object",
+                    "properties", Map.of(
+                        "companyName", Map.of("type", "string", "description", "The full name of the company")
+                    ),
+                    "required", List.of("companyName")
+                )
+            ),
+            // getStockPrice
+            new ToolMetadata(
+                "getStockPrice",
+                "Get the current stock price and currency for a specific ticker symbol (e.g., 'AAPL')",
+                Map.of(
+                    "type", "object",
+                    "properties", Map.of(
+                        "ticker", Map.of("type", "string", "description", "The stock ticker symbol, e.g., AAPL")
+                    ),
+                    "required", List.of("ticker")
+                )
+            ),
+            // scrape
+            new ToolMetadata(
+                "scrape",
+                "Fetches the content of a web page at the given URL and returns it as clean markdown text, including the page title, main content, and any relevant structured information. Use this when you need to read the actual content of a specific URL.",
+                Map.of(
+                    "type", "object",
+                    "properties", Map.of(
+                        "url", Map.of("type", "string", "description", "the full URL to fetch, including https://")
+                    ),
+                    "required", List.of("url")
+                )
+            ),
+            // drivingDistance
+            new ToolMetadata(
+                "drivingDistance",
+                "Calculates the driving distance and estimated travel time between two places by car",
+                Map.of(
+                    "type", "object",
+                    "properties", Map.of(
+                        "from", Map.of("type", "string", "description", "origin place name or address"),
+                        "to", Map.of("type", "string", "description", "destination place name or address")
+                    ),
+                    "required", List.of("from", "to")
+                )
+            ),
+            // webSearch
+            new ToolMetadata(
+                "webSearch",
+                "Searches the web for current information on any topic. Use when the user asks about recent news, facts, or anything that may have changed.",
+                Map.of(
+                    "type", "object",
+                    "properties", Map.of(
+                        "query", Map.of("type", "string", "description", "search query")
+                    ),
+                    "required", List.of("query")
+                )
+            )
+        );
     }
 
 }
