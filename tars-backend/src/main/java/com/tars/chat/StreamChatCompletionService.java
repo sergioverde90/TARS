@@ -58,7 +58,7 @@ public class StreamChatCompletionService {
 
     public SseEmitter stream(ChatCompletionRequest req) {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
-        List<ChatMessage> messages = convertMessages(req.messages());
+        List<ChatMessage> messages = convertMessages(req);
         streamRound(messages, emitter, 0);
         return emitter;
     }
@@ -295,12 +295,14 @@ public class StreamChatCompletionService {
         }
     }
 
-    private List<ChatMessage> convertMessages(List<ChatCompletionRequest.Message> messages) {
+    private List<ChatMessage> convertMessages(ChatCompletionRequest req) {
+        Map<String, String> stringStringMap = req.chatTemplateKwargs();
+        List<ChatCompletionRequest.Message> messages = req.messages();
         return new ArrayList<>(messages.stream()
             .map(m -> switch (m.role()) {
                 case "system"    -> SystemMessage.from(m.content() + TOOL_INSTRUCTION);
                 case "assistant" -> AssistantMessage.from((String) m.content());
-                default          -> UserMessage.from((String) m.content());
+                default          -> UserMessage.from((String) m.content(), stringStringMap);
             })
             .toList());
     }

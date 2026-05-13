@@ -26,7 +26,7 @@ public record ChatCompletionRequest(
     @JsonProperty("min_p") Double minP,
     @JsonProperty("repeat_penalty") Double repeatPenalty,
     @JsonProperty("thinking_budget_tokens") Integer thinkingBudgetTokens,
-    @JsonProperty("chat_template_kwargs") Map<String, Object> chatTemplateKwargs
+    @JsonProperty("chat_template_kwargs") Map<String, String> chatTemplateKwargs
 ) {
     public record Message(String role, Object content) {}
 

@@ -31,7 +31,7 @@ public class SearchTool {
         try {
             Map<String, Object> body = Map.of(
                 "query", query,
-                "max_results", 3,
+                "max_results", 10,
                 "search_depth", "basic"
             );
 
