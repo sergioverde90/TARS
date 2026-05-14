@@ -16,6 +16,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -38,8 +39,8 @@ public class StreamChatCompletionService {
 
     private static final Logger log = LoggerFactory.getLogger(StreamChatCompletionService.class);
     private static final int MAX_TOOL_ITERATIONS = 12;
-    private static final long SSE_TIMEOUT = 300_000L;
     private static final Pattern REASONING_KEY = Pattern.compile("\"reasoning\"\\s*:");
+    private static final Duration SSE_TIMEOUT = Duration.of(10, ChronoUnit.MINUTES);
 
     private final List<ToolMetadata> toolMetadata;
     private final Map<String, Function<String, String>> toolHandlers;
@@ -54,7 +55,7 @@ public class StreamChatCompletionService {
     }
 
     public SseEmitter stream(ChatCompletionRequest req) {
-        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT.toMillis());
         List<ChatMessage> messages = convertMessages(req);
         streamRound(messages, emitter, 0, req);
         return emitter;
