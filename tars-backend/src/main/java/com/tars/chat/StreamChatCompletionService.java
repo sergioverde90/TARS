@@ -59,11 +59,11 @@ public class StreamChatCompletionService {
     public SseEmitter stream(ChatCompletionRequest req) {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
         List<ChatMessage> messages = convertMessages(req);
-        streamRound(messages, emitter, 0);
+        streamRound(messages, emitter, 0, req);
         return emitter;
     }
 
-    private void streamRound(List<ChatMessage> messages, SseEmitter emitter, int depth) {
+    private void streamRound(List<ChatMessage> messages, SseEmitter emitter, int depth, ChatCompletionRequest req) {
         if (depth > MAX_TOOL_ITERATIONS) {
             log.warn("Max tool iterations reached");
             sendEvent(emitter, "[DONE]");
@@ -74,7 +74,7 @@ public class StreamChatCompletionService {
         log.info("Starting chat round {}, messages: {}", depth, messages.size());
 
         // Build request body for mlx-openai-server
-        Map<String, Object> body = buildRequestBody(messages);
+        Map<String, Object> body = buildRequestBody(messages, req);
         // Read SSE stream directly from mlx-openai-server using java.net.http.HttpClient
         HttpClient client = HttpClient.newBuilder()
             .connectTimeout(Duration.ofMinutes(5))
@@ -127,7 +127,7 @@ public class StreamChatCompletionService {
                     }
 
                     // Recurse with the updated conversation
-                    streamRound(messages, emitter, depth + 1);
+                    streamRound(messages, emitter, depth + 1, req);
                     return;
                 }
 
@@ -207,7 +207,7 @@ public class StreamChatCompletionService {
         return REASONING_KEY.matcher(data).replaceAll("\"reasoning\":");
     }
 
-    private Map<String, Object> buildRequestBody(List<ChatMessage> messages) {
+    private Map<String, Object> buildRequestBody(List<ChatMessage> messages, ChatCompletionRequest req) {
         List<Map<String, Object>> apiMessages = messages.stream()
             .map(m -> {
                 switch (m) {
@@ -277,7 +277,14 @@ public class StreamChatCompletionService {
         body.put("min_p", 0.06);
         body.put("presence_penalty", 1.2);
         body.put("repeat_penalty", 1.05);
-        body.put("chat_template_kwargs", Map.of("enable_thinking", true));
+        
+        // Use enable_thinking from request if provided, default to true
+        boolean enableThinking = true;
+        if (req.chatTemplateKwargs() != null) {
+            String thinkingValue = req.chatTemplateKwargs().getOrDefault("enable_thinking", "true");
+            enableThinking = Boolean.parseBoolean(thinkingValue);
+        }
+        body.put("chat_template_kwargs", Map.of("enable_thinking", enableThinking));
         return body;
     }
 
