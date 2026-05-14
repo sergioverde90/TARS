@@ -9,10 +9,7 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -103,6 +100,7 @@ public class StreamChatCompletionService {
                         }
                     } catch (Exception e) {
                         log.error("Error processing SSE line", e);
+                        throw e;
                     }
                 }
 
@@ -319,6 +317,7 @@ public class StreamChatCompletionService {
             emitter.send(SseEmitter.event().data(data, MediaType.TEXT_PLAIN));
         } catch (IOException e) {
             log.error("Failed to send SSE event", e);
+            throw new UncheckedIOException(e);
         }
     }
 
