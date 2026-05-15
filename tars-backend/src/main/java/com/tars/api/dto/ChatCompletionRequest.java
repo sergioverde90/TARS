@@ -28,7 +28,18 @@ public record ChatCompletionRequest(
     @JsonProperty("thinking_budget_tokens") Integer thinkingBudgetTokens,
     @JsonProperty("chat_template_kwargs") Map<String, String> chatTemplateKwargs
 ) {
-    public record Message(String role, Object content) {}
+    public record Message(String role, List<ContentItem> content) {}
+
+    /**
+     * A content item within a message.
+     * <p>
+     * Supported types:
+     * <ul>
+     *   <li>{@code "text"} — plain text content (e.g. user prompt, assistant reply)</li>
+     *   <li>{@code "pdf"} — base64-encoded PDF file content</li>
+     * </ul>
+     */
+    public record ContentItem(@JsonProperty("type") String type, @JsonProperty("text") String text) {}
 
     public record Tool(@JsonProperty("type") String type, FunctionSpec function) {
         public record FunctionSpec(

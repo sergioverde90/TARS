@@ -17,15 +17,13 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Service
 public class StreamChatCompletionService {
@@ -306,11 +304,22 @@ public class StreamChatCompletionService {
         List<ChatCompletionRequest.Message> messages = req.messages();
         return new ArrayList<>(messages.stream()
             .map(m -> switch (m.role()) {
-                case "system"    -> SystemMessage.from(m.content() + TOOL_INSTRUCTION);
-                case "assistant" -> AssistantMessage.from((String) m.content());
-                default          -> UserMessage.from((String) m.content(), stringStringMap);
+                case "system"    -> SystemMessage.from(extractText(m.content()) + TOOL_INSTRUCTION);
+                case "assistant" -> AssistantMessage.from(extractText(m.content()));
+                default          -> UserMessage.from(extractText(m.content()), stringStringMap);
             })
             .toList());
+    }
+
+    private String extractText(List<ChatCompletionRequest.ContentItem> content) {
+        if (content == null) {
+            return "";
+        }
+        return content.stream()
+            .filter(item -> "text".equals(item.type()))
+            .map(ChatCompletionRequest.ContentItem::text)
+            .filter(Objects::nonNull)
+            .collect(Collectors.joining("\n"));
     }
 
     private void sendEvent(SseEmitter emitter, String data) {
