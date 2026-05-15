@@ -17,13 +17,18 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.Base64;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import com.tars.tools.PDFTextExtractor;
 
 @Service
 public class StreamChatCompletionService {
@@ -315,11 +320,41 @@ public class StreamChatCompletionService {
         if (content == null) {
             return "";
         }
-        return content.stream()
-            .filter(item -> "text".equals(item.type()))
-            .map(ChatCompletionRequest.ContentItem::text)
-            .filter(Objects::nonNull)
-            .collect(Collectors.joining("\n"));
+
+        List<String> parts = new ArrayList<>();
+
+        for (ChatCompletionRequest.ContentItem item : content) {
+            if (item.type() == null) {
+                continue;
+            }
+
+            switch (item.type()) {
+                case "text" -> {
+                    if (item.text() != null) {
+                        parts.add(item.text());
+                    }
+                }
+                case "pdf" -> {
+                    log.info("PDF file detected. Extracting content...");
+                    String pdfText = extractPdfContent(item.text());
+                    log.info("PDF file content extracted");
+                    parts.add(pdfText);
+                }
+            }
+        }
+
+        return parts.isEmpty() ? "" : String.join("\n\n", parts);
+    }
+
+    private String extractPdfContent(String base64Pdf) {
+        try {
+            byte[] pdfBytes = Base64.getDecoder().decode(base64Pdf);
+            String extracted = PDFTextExtractor.extractTextAsMarkdown(pdfBytes);
+            return "---\n\nPDF content:\n\n" + extracted;
+        } catch (Exception e) {
+            log.warn("Failed to extract PDF content: {}", e.getMessage());
+            return "---\n\nPDF content:\n\n[Error: unable to parse PDF - " + e.getMessage() + "]";
+        }
     }
 
     private void sendEvent(SseEmitter emitter, String data) {
